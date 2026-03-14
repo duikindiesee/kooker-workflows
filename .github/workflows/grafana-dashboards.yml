@@ -1,0 +1,20 @@
+name: Grafana Dashboards Enforce
+
+on:
+  workflow_call:
+    secrets:
+      KOOKER_GRAFANA_PAT:
+        required: true
+
+jobs:
+  load-grafana:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load Grafana Dashboards via script
+        env:
+          KOOKER_GRAFANA_PAT: ${{ secrets.KOOKER_GRAFANA_PAT }}
+        run: |
+          powershell -ExecutionPolicy Bypass -File load-grafana-dashboards.ps1

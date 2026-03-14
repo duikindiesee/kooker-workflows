@@ -1,0 +1,28 @@
+name: Flyway Enforce
+
+on:
+  workflow_call:
+
+jobs:
+  validate-flyway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Validate Flyway Scripts Naming Convention
+        run: |
+          # Checks all .sql files inside src/main/resources/db/migration
+          if [ -d "src/main/resources/db/migration" ]; then
+            cd src/main/resources/db/migration
+            for file in *.sql; do
+              # Validates against V<version>__<Description>.sql pattern
+              if [[ ! "$file" =~ ^V[0-9]+(\.[0-9]+)*__[a-zA-Z0-9_]+\.sql$ ]]; then
+                echo "ERROR: Flyway script '$file' does not match the required naming convention 'V<version>__<description>.sql'."
+                exit 1
+              fi
+            done
+            echo "All Flyway scripts match the naming convention."
+          else
+            echo "No 'src/main/resources/db/migration' directory found. Skipping."
+          fi

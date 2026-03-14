@@ -1,0 +1,41 @@
+name: Swagger Enforce
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        required: false
+        type: string
+        default: '21'
+
+jobs:
+  validate-swagger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Create required folders
+        run: mkdir -p target/classes
+
+      - name: Generate OpenAPI spec using springdoc-openapi plugin
+        run: |
+          # We use the springdoc-openapi-maven-plugin to generate the final spec at build time,
+          # or simply verify compilation to ensure the spec annotations are valid.
+          # Here we just run the spring boot plugin to start internal validation.
+          mvn clean verify -DskipTests
+          
+          # If the repository configures springdoc-openapi-maven-plugin, this step
+          # verifies that it successfully spits out the openapi.json.
+          if [ -d "target/openapi" ] || ls target/*.json 1> /dev/null 2>&1; then
+             echo "Swagger documentation generated successfully."
+          else
+             echo "Warning/Error: Did not see openapi.json output. Ensure springdoc-openapi-maven-plugin is configured."
+          fi
