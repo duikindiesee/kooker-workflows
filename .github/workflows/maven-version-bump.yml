@@ -1,0 +1,189 @@
+# =============================================================================
+# maven-version-bump.yml
+# =============================================================================
+# PURPOSE
+#   Reusable workflow that automatically bumps the Maven project version in
+#   pom.xml based on the triggering commit message (Conventional Commits).
+#   Used by all Spring Boot backend services:
+#     - kooker-service-user
+#     - kooker-service-auth
+#     - kooker-gateway
+#     - kooker-service-image
+#
+# VERSIONING SCHEME
+#   Follows semver: MAJOR.MINOR.PATCH  (no -SNAPSHOT; CI manages clean versions)
+#
+#   Examples:
+#     1.0.3 + fix:  → 1.0.4
+#     1.0.3 + feat: → 1.1.0  (PATCH resets to 0)
+#     1.0.3 + feat! → 2.0.0  (MINOR+PATCH reset to 0)
+#
+# BUMP RULES (Conventional Commits — Option C)
+#   Commit prefix      → Bump type → Example
+#   ────────────────── ─────────── ──────────────────────
+#   fix:               → PATCH     →  1.0.3 → 1.0.4
+#   feat:              → MINOR     →  1.0.3 → 1.1.0
+#   feat!: or
+#   BREAKING CHANGE    → MAJOR     →  1.0.3 → 2.0.0
+#   chore/docs/ci/
+#   refactor/test      → NO BUMP   →  version unchanged
+#
+# LOOP PREVENTION
+#   Bump commits use "chore(release):" prefix, detected on the next CI run
+#   to skip bumping. The Docker build continues in the same workflow run.
+#
+# USAGE (in calling workflow)
+#   jobs:
+#     version-bump:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/maven-version-bump.yml@main
+#       with:
+#         java-version: '25'         # optional, default is '25'
+#       secrets: inherit
+#
+#     build:
+#       needs: version-bump
+#       # version: ${{ needs.version-bump.outputs.new-version }}
+#
+# REQUIRED PERMISSIONS (in calling workflow)
+#   permissions:
+#     contents: write
+#
+# REQUIRED SECRETS
+#   MAVEN_PUBLISH_TOKEN — PAT for reading from GitHub Packages (kooker-parent-build)
+# =============================================================================
+
+name: Maven Version Bump (Conventional Commits)
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: "JDK version to use for mvn help:evaluate and versions:set. Default: '25'."
+        required: false
+        type: string
+        default: '25'
+
+    outputs:
+      new-version:
+        description: "The Maven project version after the bump (or unchanged if no bump)"
+        value: ${{ jobs.bump.outputs.new-version }}
+      bumped:
+        description: "'true' if a version bump was committed, 'false' otherwise"
+        value: ${{ jobs.bump.outputs.bumped }}
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push the bump commit back to the branch
+
+    outputs:
+      new-version: ${{ steps.bump.outputs.new-version }}
+      bumped:      ${{ steps.bump.outputs.bumped }}
+
+    steps:
+      - name: Checkout (full history for push)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up JDK (needed for mvn help:evaluate and versions:set)
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+
+      - name: Detect bump type and apply version
+        id: bump
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          echo "=== Commit: ${COMMIT_MSG}"
+
+          # ──────────────────────────────────────────────────────────────────
+          # LOOP GUARD
+          # If this commit is itself a release bump, skip to prevent infinite loop.
+          # ──────────────────────────────────────────────────────────────────
+          if echo "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
+            echo "Release commit detected — skipping bump to prevent infinite loop."
+            CURRENT=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null | tail -1)
+            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+            echo "bumped=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ──────────────────────────────────────────────────────────────────
+          # READ CURRENT VERSION from pom.xml via Maven (handles parent poms,
+          # property interpolation, multi-module layouts correctly).
+          # Strips -SNAPSHOT if present.
+          # ──────────────────────────────────────────────────────────────────
+          RAW=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null | tail -1)
+          CURRENT=${RAW%-SNAPSHOT}
+          if [ -z "$CURRENT" ]; then
+            echo "ERROR: Could not read project.version from pom.xml" >&2
+            exit 1
+          fi
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          PATCH=$(echo $CURRENT | cut -d. -f3)
+          echo "Current version: ${CURRENT}"
+
+          # ──────────────────────────────────────────────────────────────────
+          # DETERMINE BUMP TYPE from Conventional Commit prefix
+          # ──────────────────────────────────────────────────────────────────
+          BUMP_TYPE="none"
+          if echo "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
+            BUMP_TYPE="major"
+          elif echo "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
+            BUMP_TYPE="minor"
+          elif echo "$COMMIT_MSG" | grep -qE "^fix(\([^)]+\))?:"; then
+            BUMP_TYPE="patch"
+          fi
+
+          if [ "$BUMP_TYPE" = "none" ]; then
+            echo "No version bump for prefix: ${COMMIT_MSG}"
+            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+            echo "bumped=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ──────────────────────────────────────────────────────────────────
+          # CALCULATE NEW VERSION
+          # ──────────────────────────────────────────────────────────────────
+          case $BUMP_TYPE in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: ${NEW_VERSION}  bump: ${BUMP_TYPE}"
+
+          # ──────────────────────────────────────────────────────────────────
+          # WRITE NEW VERSION to all pom.xml files via Maven Versions Plugin.
+          # -DgenerateBackupPoms=false avoids committing .versionsBackup files.
+          # Covers root pom + all submodules automatically.
+          # ──────────────────────────────────────────────────────────────────
+          mvn -B versions:set -DnewVersion="${NEW_VERSION}" -DgenerateBackupPoms=false
+
+          # ──────────────────────────────────────────────────────────────────
+          # COMMIT AND PUSH
+          # ──────────────────────────────────────────────────────────────────
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pom.xml '**/pom.xml'
+          git commit -m "chore(release): bump to ${NEW_VERSION}"
+          git push
+
+          echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "bumped=true" >> $GITHUB_OUTPUT
