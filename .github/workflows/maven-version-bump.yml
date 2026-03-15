@@ -177,6 +177,19 @@ jobs:
           mvn -B versions:set -DnewVersion="${NEW_VERSION}" -DgenerateBackupPoms=false
 
           # ──────────────────────────────────────────────────────────────────
+          # SYNC OPENAPI SPEC VERSION (if present)
+          # Keeps postman/specs/openapi.yaml info.version in lockstep with the
+          # Maven artifact version. Only applies to services that have a spec.
+          # ──────────────────────────────────────────────────────────────────
+          SPEC_FILE="postman/specs/openapi.yaml"
+          if [ -f "${SPEC_FILE}" ]; then
+            # Match exactly two-space-indented version: line (the info.version field)
+            sed -i "s/^  version: .*/  version: ${NEW_VERSION}/" "${SPEC_FILE}"
+            git add "${SPEC_FILE}"
+            echo "Also bumped ${SPEC_FILE} to ${NEW_VERSION}"
+          fi
+
+          # ──────────────────────────────────────────────────────────────────
           # COMMIT AND PUSH
           # ──────────────────────────────────────────────────────────────────
           git config user.name  "github-actions[bot]"
