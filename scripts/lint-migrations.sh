@@ -16,17 +16,27 @@
 # =============================================================================
 set -uo pipefail
 
-MODE="${KOOKER_LINT_MODE:-error}"
+# Validate MODE — only 'warn' or 'error' are accepted.
+# Any unknown value (including typos) defaults to 'error' to prevent
+# accidental bypass of the safety check.
+RAW_MODE="${KOOKER_LINT_MODE:-error}"
+if [ "$RAW_MODE" = "warn" ]; then
+  MODE="warn"
+else
+  MODE="error"  # default, covers typos and unset
+fi
 
+# BREAKING_PATTERNS — aligned with flyway-lint.yml (use [^;]* for ALTER to avoid
+# matching across statement boundaries, consistent with CI behaviour).
 BREAKING_PATTERNS=(
   '(^|[[:space:]])DROP[[:space:]]+TABLE'
   '(^|[[:space:]])DROP[[:space:]]+COLUMN'
   '(^|[[:space:]])RENAME[[:space:]]+TABLE'
   '(^|[[:space:]])RENAME[[:space:]]+COLUMN'
   '(^|[[:space:]])TRUNCATE[[:space:]]'
-  'ALTER[[:space:]]+TABLE.*[[:space:]]DROP[[:space:]]'
-  'ALTER[[:space:]]+TABLE.*[[:space:]]MODIFY[[:space:]]+COLUMN'
-  'ALTER[[:space:]]+TABLE.*[[:space:]]CHANGE[[:space:]]+COLUMN'
+  'ALTER[[:space:]]+TABLE[^;]*[[:space:]]DROP[[:space:]]'
+  'ALTER[[:space:]]+TABLE[^;]*[[:space:]]MODIFY[[:space:]]+COLUMN'
+  'ALTER[[:space:]]+TABLE[^;]*[[:space:]]CHANGE[[:space:]]+COLUMN'
 )
 
 NAMING_RE='^V[0-9]+(\.[0-9]+)*__[a-zA-Z0-9_]+\.sql$'
@@ -53,9 +63,15 @@ while IFS= read -r file; do
   fi
 
   # ── Breaking-change scan ───────────────────────────────────────────────
+  # Read from the staged index (git show ":$file"), NOT the working tree.
+  # This ensures we check exactly what will be committed, even if the
+  # developer has made further edits after staging.
   LINE_NUM=0
   while IFS= read -r line; do
     LINE_NUM=$((LINE_NUM+1))
+    # Skip SQL single-line comments to prevent false positives (e.g. -- DROP TABLE example)
+    TRIMMED=$(echo "$line" | sed 's/^[[:space:]]*//')
+    [[ "$TRIMMED" == --* ]] && continue
     echo "$line" | grep -qi 'kooker:allow-breaking' && continue
     UPPER=$(echo "$line" | tr '[:lower:]' '[:upper:]')
     for PAT in "${BREAKING_PATTERNS[@]}"; do
@@ -64,7 +80,7 @@ while IFS= read -r file; do
         FAIL=1
       fi
     done
-  done < "$file"
+  done < <(git show ":${file}" 2>/dev/null || cat "$file")
 done <<< "$STAGED"
 
 if [ $FAIL -ne 0 ]; then

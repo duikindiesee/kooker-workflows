@@ -3,6 +3,10 @@ name: Flyway Lint
 # Reusable workflow — detects breaking Flyway migration changes.
 # Outputs has_db_changes=true if new/modified .sql files are detected.
 #
+# NOTE: This workflow supersedes flyway-enforce.yml.
+#       flyway-enforce.yml is kept for backward compatibility but is deprecated.
+#       New consumers should use flyway-lint.yml instead.
+#
 # Usage in consuming repos:
 #   uses: duikindiesee/kooker-workflows/.github/workflows/flyway-lint.yml@main
 #   with:
@@ -36,9 +40,17 @@ jobs:
         id: detect
         run: |
           MIGRATION_PATH="${{ inputs.migration-path }}"
-          BASE=${GITHUB_BASE_REF:-HEAD~1}
-          CHANGED=$(git diff --name-only --diff-filter=AM "origin/${BASE}...HEAD" -- "${MIGRATION_PATH}" 2>/dev/null || \
-                    git diff --name-only --diff-filter=AM HEAD~1..HEAD -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+
+          # Branch cleanly on event type:
+          #   PR builds: use origin/<base-branch>...HEAD (reliable)
+          #   Push builds: use HEAD~1..HEAD (no GITHUB_BASE_REF available)
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            # Pull request context — compare against the PR base branch
+            CHANGED=$(git diff --name-only --diff-filter=AM "origin/${GITHUB_BASE_REF}...HEAD" -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+          else
+            # Push context — compare against the previous commit
+            CHANGED=$(git diff --name-only --diff-filter=AM HEAD~1..HEAD -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+          fi
 
           if [ -n "$CHANGED" ]; then
             echo "has_db_changes=true" >> $GITHUB_OUTPUT
@@ -91,6 +103,11 @@ jobs:
             LINE_NUM=0
             while IFS= read -r line; do
               LINE_NUM=$((LINE_NUM+1))
+              # Skip SQL single-line comments (--) and blank lines to avoid
+              # false positives where pattern keywords appear in comments.
+              # Inline kooker:allow-breaking annotation on the same line also bypasses.
+              TRIMMED=$(echo "$line" | sed 's/^[[:space:]]*//')
+              [[ "$TRIMMED" == --* ]] && continue
               echo "$line" | grep -qi 'kooker:allow-breaking' && continue
               UPPER=$(echo "$line" | tr '[:lower:]' '[:upper:]')
               for PAT in "${BREAKING_PATTERNS[@]}"; do
