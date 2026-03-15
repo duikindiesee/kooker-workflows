@@ -1,0 +1,101 @@
+name: Auto Version Tag
+
+# Reusable workflow — tags the repo on merge to main.
+#
+# Version scheme:
+#   has-db-changes=true  → vX.Y.Z.N  (micro bump — 4th part)
+#   has-db-changes=false → vX.Y.Z    (patch bump — 3rd part, resets micro)
+#
+# Usage:
+#   uses: duikindiesee/kooker-workflows/.github/workflows/auto-version.yml@main
+#   with:
+#     has-db-changes: ${{ needs.flyway-lint.outputs.has_db_changes }}
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      has-db-changes:
+        required: true
+        type: string
+        description: "'true' if the PR contains new Flyway migration files"
+    outputs:
+      version:
+        description: "The newly created version tag (e.g. v1.2.3 or v1.2.3.1)"
+        value: ${{ jobs.tag.outputs.version }}
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    # Serialise tag creation per-repo to prevent two concurrent merges computing
+    # the same version tag and racing on 'git push origin $TAG'.
+    # cancel-in-progress: false ensures the second run waits rather than dying.
+    concurrency:
+      group: auto-version-tag-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.compute.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute next version tag
+        id: compute
+        run: |
+          set -euo pipefail
+
+          HAS_DB="${{ inputs.has-db-changes }}"
+
+          # Latest tag matching vX.Y.Z or vX.Y.Z.N; default to v0.0.0
+          LATEST=$(git tag --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+            | head -n1 || true)
+          LATEST=${LATEST:-v0.0.0}
+          echo "Latest tag: $LATEST"
+
+          # Strip leading 'v', split on '.', trailing dot ensures 4 fields always
+          RAW=${LATEST#v}
+          IFS='.' read -r MAJOR MINOR PATCH MICRO <<< "${RAW}."
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+          MICRO=${MICRO:-}
+
+          if [ "$HAS_DB" = "true" ]; then
+            # Micro bump: keep X.Y.Z, increment 4th part
+            if [ -z "$MICRO" ]; then
+              NEXT="v${MAJOR}.${MINOR}.${PATCH}.1"
+            else
+              NEXT="v${MAJOR}.${MINOR}.${PATCH}.$((MICRO+1))"
+            fi
+          else
+            # Patch bump: increment Z, drop micro part
+            NEXT="v${MAJOR}.${MINOR}.$((PATCH+1))"
+          fi
+
+          echo "Next version: $NEXT"
+          echo "tag=$NEXT" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ steps.compute.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" -m "Auto-version: $TAG"
+          git push origin "$TAG"
+          echo "Tagged: $TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.compute.outputs.tag }}
+          name: ${{ steps.compute.outputs.tag }}
+          generate_release_notes: true
+          prerelease: false

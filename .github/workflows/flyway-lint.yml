@@ -1,0 +1,129 @@
+name: Flyway Lint
+
+# Reusable workflow — detects breaking Flyway migration changes.
+# Outputs has_db_changes=true if new/modified .sql files are detected.
+#
+# Usage in consuming repos:
+#   uses: duikindiesee/kooker-workflows/.github/workflows/flyway-lint.yml@main
+#   with:
+#     migration-path: kooker-service-user-app/src/main/resources/db/migration
+
+on:
+  workflow_call:
+    inputs:
+      migration-path:
+        required: false
+        type: string
+        default: 'src/main/resources/db/migration'
+    outputs:
+      has_db_changes:
+        description: "'true' if new/modified migration files were found in this PR"
+        value: ${{ jobs.lint.outputs.has_db_changes }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    outputs:
+      has_db_changes: ${{ steps.detect.outputs.has_db_changes }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect new/changed migration files
+        id: detect
+        run: |
+          MIGRATION_PATH="${{ inputs.migration-path }}"
+
+          # Branch cleanly on event type:
+          #   PR builds: use origin/<base-branch>...HEAD (reliable)
+          #   Push builds: use HEAD~1..HEAD (no GITHUB_BASE_REF available)
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            # Pull request context — compare against the PR base branch
+            CHANGED=$(git diff --name-only --diff-filter=AM "origin/${GITHUB_BASE_REF}...HEAD" -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+          else
+            # Push context — compare against the previous commit
+            CHANGED=$(git diff --name-only --diff-filter=AM HEAD~1..HEAD -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+          fi
+
+          if [ -n "$CHANGED" ]; then
+            echo "has_db_changes=true" >> $GITHUB_OUTPUT
+            echo "Changed migration files:"
+            echo "$CHANGED"
+          else
+            echo "has_db_changes=false" >> $GITHUB_OUTPUT
+            echo "No migration files changed."
+          fi
+          printf 'CHANGED_FILES<<EOF\n%s\nEOF\n' "$CHANGED" >> $GITHUB_ENV
+
+      - name: Validate naming convention
+        run: |
+          MIGRATION_PATH="${{ inputs.migration-path }}"
+          if [ ! -d "$MIGRATION_PATH" ]; then
+            echo "No directory '$MIGRATION_PATH' — skipping naming check."
+            exit 0
+          fi
+          FAIL=0
+          while IFS= read -r file; do
+            fname=$(basename "$file")
+            if [[ ! "$fname" =~ ^V[0-9]+(\.[0-9]+)*__[a-zA-Z0-9_]+\.sql$ ]]; then
+              echo "::error file=$file::Naming violation: '$fname' must match V<N>__<description>.sql"
+              FAIL=1
+            fi
+          done < <(find "$MIGRATION_PATH" -name '*.sql' 2>/dev/null)
+          [ $FAIL -eq 0 ] && echo "Naming convention OK."
+          exit $FAIL
+
+      - name: Check for breaking SQL patterns
+        if: env.CHANGED_FILES != ''
+        run: |
+          BREAKING_PATTERNS=(
+            '(^|[[:space:]])DROP[[:space:]]+TABLE'
+            '(^|[[:space:]])DROP[[:space:]]+COLUMN'
+            '(^|[[:space:]])RENAME[[:space:]]+TABLE'
+            '(^|[[:space:]])RENAME[[:space:]]+COLUMN'
+            '(^|[[:space:]])TRUNCATE[[:space:]]'
+            'ALTER[[:space:]]+TABLE[^;]*[[:space:]]DROP[[:space:]]'
+            'ALTER[[:space:]]+TABLE[^;]*[[:space:]]MODIFY[[:space:]]+COLUMN'
+            'ALTER[[:space:]]+TABLE[^;]*[[:space:]]CHANGE[[:space:]]+COLUMN'
+          )
+
+          FAIL=0
+
+          while IFS= read -r sql_file; do
+            [ -z "$sql_file" ] && continue
+            [ -f "$sql_file" ] || continue
+            echo "--- Scanning: $sql_file ---"
+            LINE_NUM=0
+            while IFS= read -r line; do
+              LINE_NUM=$((LINE_NUM+1))
+              # Skip SQL single-line comments (--) and blank lines to avoid
+              # false positives where pattern keywords appear in comments.
+              # Inline kooker:allow-breaking annotation on the same line also bypasses.
+              TRIMMED=$(echo "$line" | sed 's/^[[:space:]]*//')
+              [[ "$TRIMMED" == --* ]] && continue
+              echo "$line" | grep -qi 'kooker:allow-breaking' && continue
+              UPPER=$(echo "$line" | tr '[:lower:]' '[:upper:]')
+              for PAT in "${BREAKING_PATTERNS[@]}"; do
+                if echo "$UPPER" | grep -qE "$PAT"; then
+                  echo "::error file=$sql_file,line=$LINE_NUM::BREAKING CHANGE: $line"
+                  FAIL=1
+                fi
+              done
+            done < "$sql_file"
+          done <<< "$CHANGED_FILES"
+
+          if [ $FAIL -ne 0 ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  BREAKING DB CHANGE — PR BLOCKED                           ║"
+            echo "║  Flyway migrations must be additive-only.                  ║"
+            echo "║  To override a specific line, add this SQL comment:        ║"
+            echo "║    -- kooker:allow-breaking                                ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            exit 1
+          fi
+
+          echo "No breaking SQL patterns detected. ✅"

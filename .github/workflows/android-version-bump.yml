@@ -1,0 +1,186 @@
+# =============================================================================
+# android-version-bump.yml
+# =============================================================================
+# PURPOSE
+#   Reusable workflow that automatically bumps the Android app version in
+#   build.gradle based on the triggering commit message (Conventional Commits).
+#
+# VERSIONING SCHEME
+#   versionName follows semver: MAJOR.MINOR.PATCH
+#   versionCode = MAJOR*100 + MINOR*10 + PATCH  (stays in sync and readable)
+#
+#   Examples:
+#     1.0.0  → versionCode 100
+#     1.1.0  → versionCode 110
+#     1.1.1  → versionCode 111
+#     2.0.0  → versionCode 200
+#
+# BUMP RULES (Conventional Commits — Option C)
+#   Commit prefix      → Bump type → Example
+#   ────────────────── ─────────── ──────────────────────
+#   fix:               → PATCH     →  1.0.0 → 1.0.1
+#   feat:              → MINOR     →  1.0.0 → 1.1.0  (resets PATCH to 0)
+#   feat!: or
+#   BREAKING CHANGE    → MAJOR     →  1.0.0 → 2.0.0  (resets MINOR+PATCH to 0)
+#   chore/docs/ci/
+#   refactor/test      → NO BUMP   →  version unchanged
+#
+# LOOP PREVENTION
+#   The bump step writes a commit with message "chore(release): bump X to Y".
+#   The next CI run detects this prefix and skips bumping — preventing
+#   an infinite bump loop. The build continues normally in the same run.
+#
+# USAGE (in calling workflow)
+#   jobs:
+#     version-bump:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/android-version-bump.yml@main
+#       with:
+#         app-dir: sportifine          # subdirectory inside the repo
+#       secrets: inherit
+#
+#     build:
+#       needs: version-bump
+#       # refer to bumped version: ${{ needs.version-bump.outputs.new-version }}
+#
+# REQUIRED PERMISSIONS (in calling workflow)
+#   permissions:
+#     contents: write
+# =============================================================================
+
+name: Android Version Bump (Conventional Commits)
+
+on:
+  workflow_call:
+    inputs:
+      app-dir:
+        description: |
+          Subdirectory containing the Android project, relative to the repo root.
+          Must contain an 'app/build.gradle' file with versionName and versionCode.
+          Example: 'sportifine', 'sprout', 'otto'
+        required: true
+        type: string
+
+    outputs:
+      new-version:
+        description: "The versionName after the bump (or unchanged if no bump needed)"
+        value: ${{ jobs.bump.outputs.new-version }}
+      new-version-code:
+        description: "The versionCode after the bump (MAJOR*100 + MINOR*10 + PATCH)"
+        value: ${{ jobs.bump.outputs.new-version-code }}
+      bumped:
+        description: "'true' if a version bump was committed, 'false' otherwise"
+        value: ${{ jobs.bump.outputs.bumped }}
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push the bump commit back to the branch
+
+    outputs:
+      new-version:      ${{ steps.bump.outputs.new-version }}
+      new-version-code: ${{ steps.bump.outputs.new-version-code }}
+      bumped:           ${{ steps.bump.outputs.bumped }}
+
+    steps:
+      - name: Checkout (full history for push)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Detect bump type and apply version
+        id: bump
+        run: |
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          APP_DIR="${{ inputs.app-dir }}"
+          BUILD_GRADLE="${APP_DIR}/app/build.gradle"
+
+          echo "=== Commit  : ${COMMIT_MSG}"
+          echo "=== App dir : ${APP_DIR}"
+          echo "=== Gradle  : ${BUILD_GRADLE}"
+
+          # ──────────────────────────────────────────────────────────────────
+          # LOOP GUARD
+          # If this commit is itself a release bump (pushed by this workflow),
+          # skip bumping. The build continues using the already-bumped version.
+          # ──────────────────────────────────────────────────────────────────
+          if echo "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
+            echo "Release commit detected — skipping bump to prevent infinite loop."
+            CURRENT=$(grep -E "^\s+versionName" "$BUILD_GRADLE" | grep -oP "['\"]\K[^'\"]+")
+            MAJOR=$(echo $CURRENT | cut -d. -f1)
+            MINOR=$(echo $CURRENT | cut -d. -f2)
+            PATCH=$(echo $CURRENT | cut -d. -f3)
+            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+            echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))" >> $GITHUB_OUTPUT
+            echo "bumped=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ──────────────────────────────────────────────────────────────────
+          # READ CURRENT VERSION
+          # Handles both single and double quotes around the versionName value.
+          # ──────────────────────────────────────────────────────────────────
+          CURRENT=$(grep -E "^\s+versionName" "$BUILD_GRADLE" | grep -oP "['\"]\K[^'\"]+")
+          if [ -z "$CURRENT" ]; then
+            echo "ERROR: Could not parse versionName from ${BUILD_GRADLE}" >&2
+            exit 1
+          fi
+          MAJOR=$(echo $CURRENT | cut -d. -f1)
+          MINOR=$(echo $CURRENT | cut -d. -f2)
+          PATCH=$(echo $CURRENT | cut -d. -f3)
+          echo "Current: ${CURRENT}  (versionCode: $(( MAJOR * 100 + MINOR * 10 + PATCH )))"
+
+          # ──────────────────────────────────────────────────────────────────
+          # DETERMINE BUMP TYPE from Conventional Commit prefix
+          # ──────────────────────────────────────────────────────────────────
+          BUMP_TYPE="none"
+          if echo "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
+            BUMP_TYPE="major"
+          elif echo "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
+            BUMP_TYPE="minor"
+          elif echo "$COMMIT_MSG" | grep -qE "^fix(\([^)]+\))?:"; then
+            BUMP_TYPE="patch"
+          fi
+
+          if [ "$BUMP_TYPE" = "none" ]; then
+            echo "No version bump for prefix: ${COMMIT_MSG}"
+            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+            echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))" >> $GITHUB_OUTPUT
+            echo "bumped=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # ──────────────────────────────────────────────────────────────────
+          # CALCULATE NEW VERSION
+          # ──────────────────────────────────────────────────────────────────
+          case $BUMP_TYPE in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_CODE=$(( MAJOR * 100 + MINOR * 10 + PATCH ))
+          echo "New: ${NEW_VERSION}  (versionCode: ${NEW_CODE})  bump: ${BUMP_TYPE}"
+
+          # ──────────────────────────────────────────────────────────────────
+          # WRITE NEW VERSION into build.gradle
+          # Only touches versionName and versionCode lines; preserves everything else.
+          # ──────────────────────────────────────────────────────────────────
+          sed -i "s/versionName '[^']*'/versionName '${NEW_VERSION}'/" "$BUILD_GRADLE"
+          sed -i "s/versionCode [0-9]*/versionCode ${NEW_CODE}/" "$BUILD_GRADLE"
+
+          # ──────────────────────────────────────────────────────────────────
+          # COMMIT AND PUSH
+          # The "chore(release):" prefix is the loop guard for the next run.
+          # ──────────────────────────────────────────────────────────────────
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${APP_DIR}/app/build.gradle"
+          git commit -m "chore(release): bump ${APP_DIR} to ${NEW_VERSION}"
+          git push
+
+          echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "new-version-code=${NEW_CODE}" >> $GITHUB_OUTPUT
+          echo "bumped=true" >> $GITHUB_OUTPUT

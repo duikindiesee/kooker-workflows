@@ -1,0 +1,157 @@
+# kooker-workflows
+
+Reusable GitHub Actions workflows for the [Kooker](https://github.com/duikindiesee) ecosystem.
+
+> [!IMPORTANT]
+> **This repository must remain public.**
+> GitHub's reusable workflow rules only allow *private* repositories to call reusable workflows
+> from the **same repository**. Cross-repository calls — even within the same org — require the
+> workflow source to be either **public** (all GitHub plans) or **internal** (GitHub Enterprise Cloud only).
+> `kooker-workflows` contains no secrets or proprietary code; keeping it public is safe and is the
+> standard pattern for shared workflow libraries.
+
+---
+
+## Workflows
+
+### `maven-version-bump.yml` — Maven / Spring Boot version bump
+
+Bumps `pom.xml` version on every merge to `main` based on the Conventional Commit prefix.
+
+| Commit prefix | Bump | Example |
+|---|---|---|
+| `fix:` | PATCH | `1.0.0 → 1.0.1` |
+| `feat:` | MINOR | `1.0.0 → 1.1.0` |
+| `feat!:` / `BREAKING CHANGE` | MAJOR | `1.0.0 → 2.0.0` |
+| `chore:` / `ci:` / `docs:` / `test:` | none | — |
+
+Loop prevention: commits starting with `chore(release):` are skipped.
+
+**Inputs:** none  
+**Secrets:** `GITHUB_TOKEN` (from `secrets: inherit`)  
+**Outputs:** `new-version`, `bumped`
+
+```yaml
+jobs:
+  version-bump:
+    uses: duikindiesee/kooker-workflows/.github/workflows/maven-version-bump.yml@main
+    secrets: inherit
+```
+
+---
+
+### `android-version-bump.yml` — Android version bump
+
+Bumps `versionName` and `versionCode` in `{app-dir}/app/build.gradle` based on the same Conventional Commit rules.
+
+`versionCode` scheme: `MAJOR×100 + MINOR×10 + PATCH` (e.g. `1.2.3 → 123`).
+
+**Inputs:**
+
+| Input | Required | Description |
+|---|---|---|
+| `app-dir` | ✅ | Subdirectory containing the Android project |
+
+**Outputs:** `new-version`, `new-version-code`, `bumped`
+
+```yaml
+jobs:
+  version-bump:
+    uses: duikindiesee/kooker-workflows/.github/workflows/android-version-bump.yml@main
+    with:
+      app-dir: my-app
+    secrets: inherit
+    permissions:
+      contents: write
+```
+
+---
+
+### `flyway-lint.yml` — Flyway migration detector
+
+Detects new or modified SQL migration files in a PR. Outputs `has_db_changes=true` which downstream jobs use to decide whether a DB-aware version bump is needed.
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `migration-path` | ❌ | `src/main/resources/db/migration` | Path to Flyway migrations directory |
+
+**Outputs:** `has_db_changes` (`'true'` / `'false'`)
+
+```yaml
+jobs:
+  flyway-lint:
+    uses: duikindiesee/kooker-workflows/.github/workflows/flyway-lint.yml@main
+    with:
+      migration-path: my-module/src/main/resources/db/migration
+```
+
+---
+
+### `auto-version.yml` — Auto tag on merge to main
+
+Tags the repo with a semver version on merge. Distinguishes DB-breaking changes (4-part version `vX.Y.Z.N`) from regular patches.
+
+**Inputs:**
+
+| Input | Required | Description |
+|---|---|---|
+| `has-db-changes` | ✅ | Pass output of `flyway-lint` |
+
+```yaml
+jobs:
+  tag:
+    uses: duikindiesee/kooker-workflows/.github/workflows/auto-version.yml@main
+    with:
+      has-db-changes: ${{ needs.flyway-lint.outputs.has_db_changes }}
+    secrets: inherit
+```
+
+---
+
+### `swagger-enforce.yml` — OpenAPI / Swagger validation
+
+Validates that the OpenAPI spec compiles against the Spring Boot app. Fails the PR if the spec is inconsistent.
+
+**Inputs:**
+
+| Input | Required | Default |
+|---|---|---|
+| `java-version` | ❌ | `21` |
+
+```yaml
+jobs:
+  validate:
+    uses: duikindiesee/kooker-workflows/.github/workflows/swagger-enforce.yml@main
+```
+
+---
+
+## Organisation Setup
+
+For all repos in `duikindiesee` to consume these workflows, the org must have:
+
+### 1. Org Actions Permissions
+`Settings → Actions → General → Actions permissions`
+
+→ **Allow all actions and reusable workflows**
+
+### 2. Default Workflow Permissions
+`Settings → Actions → General → Workflow permissions`
+
+→ **Read and write permissions** ✅  
+→ **Allow GitHub Actions to create and approve pull requests** ✅
+
+Without read/write, `maven-version-bump` and `android-version-bump` cannot push the version bump commit back to the branch.
+
+---
+
+## Adding a New Workflow
+
+1. Create `.github/workflows/<name>.yml` with `on: workflow_call:` trigger
+2. Document inputs, outputs, and secrets in this README
+3. Add the calling snippet to the consumer repo's workflow
+4. Open a PR — the workflow is available to all `duikindiesee` repos as soon as it merges to `main`
+
+> **Do not make this repo private.** See the note at the top for why.
