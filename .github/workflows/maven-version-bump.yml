@@ -11,23 +11,24 @@
 #     - kooker-service-image
 #
 # VERSIONING SCHEME
-#   Follows semver: MAJOR.MINOR.PATCH.MICRO  (no -SNAPSHOT; CI manages clean versions)
-#   MICRO segment appended if changes exist in db/migration/*.sql or commit contains flyway/dbmigration keywords.
+#   Follows standard SemVer 2.0.0: MAJOR.MINOR.PATCH (no -SNAPSHOT; CI manages clean versions)
+#   A standard PATCH bump occurs if changes exist in db/migration/*.sql or commit contains flyway keyword,
+#   even if the commit prefix implies no bump (e.g. chore).
 #
 #   Examples:
-#     1.0.3 + fix:  → 1.0.4
-#     1.0.3 + feat: → 1.1.0  (PATCH resets to 0)
-#     1.0.3 + feat! → 2.0.0  (MINOR+PATCH reset to 0)
-#     1.0.3 + flyway: → 1.0.3.1 (MICRO incremented or appended)
+#     1.0.3 + fix:    → 1.0.4
+#     1.0.3 + feat:   → 1.1.0  (PATCH resets to 0)
+#     1.0.3 + feat!   → 2.0.0  (MINOR+PATCH reset to 0)
+#     1.0.3 + flyway  → 1.0.4  (PATCH incremented)
 #
-# BUMP RULES (Conventional Commits — Option C)
+# BUMP RULES (Conventional Commits)
 #   Commit prefix      → Bump type → Example
 #   ────────────────── ─────────── ──────────────────────
 #   fix:               → PATCH     →  1.0.3 → 1.0.4
 #   feat:              → MINOR     →  1.0.3 → 1.1.0
 #   feat!: or
 #   BREAKING CHANGE    → MAJOR     →  1.0.3 → 2.0.0
-#   (db schema change) → MICRO     →  1.0.3 → 1.0.3.1
+#   (db schema change) → PATCH     →  1.0.3 → 1.0.4
 #   chore/docs/ci/
 #   refactor/test      → NO BUMP   →  version unchanged
 #
@@ -73,9 +74,6 @@ on:
       bumped:
         description: "'true' if a version bump was committed, 'false' otherwise"
         value: ${{ jobs.bump.outputs.bumped }}
-      is_micro_version:
-        description: "'true' if the bump was a database schema micro-version bump"
-        value: ${{ jobs.bump.outputs.is_micro_version }}
 
 jobs:
   bump:
@@ -86,7 +84,6 @@ jobs:
     outputs:
       new-version: ${{ steps.bump.outputs.new-version }}
       bumped:      ${{ steps.bump.outputs.bumped }}
-      is_micro_version: ${{ steps.bump.outputs.is_micro_version }}
 
     steps:
       - name: Checkout (full history for push)
