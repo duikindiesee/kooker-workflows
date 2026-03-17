@@ -136,6 +136,7 @@ jobs:
           MAJOR=$(echo $CURRENT | cut -d. -f1)
           MINOR=$(echo $CURRENT | cut -d. -f2)
           PATCH=$(echo $CURRENT | cut -d. -f3)
+          MICRO=$(echo $CURRENT | cut -d. -f4)
           echo "Current version: ${CURRENT}"
 
           # ──────────────────────────────────────────────────────────────────
@@ -151,22 +152,39 @@ jobs:
           fi
 
           if [ "$BUMP_TYPE" = "none" ]; then
-            echo "No version bump for prefix: ${COMMIT_MSG}"
-            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
-            echo "bumped=false" >> $GITHUB_OUTPUT
-            exit 0
+            if git diff-tree --no-commit-id --name-only -r HEAD | grep -q 'db/migration/.*\.sql$'; then
+              BUMP_TYPE="micro"
+            elif echo "$COMMIT_MSG" | grep -qiE "(flyway|dbmigration|db-migration)"; then
+              BUMP_TYPE="micro"
+            else
+              echo "No version bump for prefix: ${COMMIT_MSG}"
+              echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+              echo "bumped=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
 
           # ──────────────────────────────────────────────────────────────────
           # CALCULATE NEW VERSION
           # ──────────────────────────────────────────────────────────────────
           case $BUMP_TYPE in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0; MICRO="" ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0; MICRO="" ;;
+            patch) PATCH=$((PATCH + 1)); MICRO="" ;;
+            micro)
+              if [ -z "$MICRO" ]; then
+                MICRO=1
+              else
+                MICRO=$((MICRO + 1))
+              fi
+              ;;
           esac
 
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          if [ -z "$MICRO" ]; then
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          else
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}.${MICRO}"
+          fi
           echo "New version: ${NEW_VERSION}  bump: ${BUMP_TYPE}"
 
           # ──────────────────────────────────────────────────────────────────
@@ -200,3 +218,8 @@ jobs:
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
+          if [ "$BUMP_TYPE" = "micro" ]; then
+            echo "is_micro_version=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_micro_version=false" >> $GITHUB_OUTPUT
+          fi
