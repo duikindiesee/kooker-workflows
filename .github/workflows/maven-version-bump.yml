@@ -11,20 +11,24 @@
 #     - kooker-service-image
 #
 # VERSIONING SCHEME
-#   Follows semver: MAJOR.MINOR.PATCH  (no -SNAPSHOT; CI manages clean versions)
+#   Follows standard SemVer 2.0.0: MAJOR.MINOR.PATCH (no -SNAPSHOT; CI manages clean versions)
+#   A standard PATCH bump occurs if changes exist in db/migration/*.sql or commit contains flyway keyword,
+#   even if the commit prefix implies no bump (e.g. chore).
 #
 #   Examples:
-#     1.0.3 + fix:  → 1.0.4
-#     1.0.3 + feat: → 1.1.0  (PATCH resets to 0)
-#     1.0.3 + feat! → 2.0.0  (MINOR+PATCH reset to 0)
+#     1.0.3 + fix:    → 1.0.4
+#     1.0.3 + feat:   → 1.1.0  (PATCH resets to 0)
+#     1.0.3 + feat!   → 2.0.0  (MINOR+PATCH reset to 0)
+#     1.0.3 + flyway  → 1.0.4  (PATCH incremented)
 #
-# BUMP RULES (Conventional Commits — Option C)
+# BUMP RULES (Conventional Commits)
 #   Commit prefix      → Bump type → Example
 #   ────────────────── ─────────── ──────────────────────
 #   fix:               → PATCH     →  1.0.3 → 1.0.4
 #   feat:              → MINOR     →  1.0.3 → 1.1.0
 #   feat!: or
 #   BREAKING CHANGE    → MAJOR     →  1.0.3 → 2.0.0
+#   (db schema change) → PATCH     →  1.0.3 → 1.0.4
 #   chore/docs/ci/
 #   refactor/test      → NO BUMP   →  version unchanged
 #
@@ -151,10 +155,16 @@ jobs:
           fi
 
           if [ "$BUMP_TYPE" = "none" ]; then
-            echo "No version bump for prefix: ${COMMIT_MSG}"
-            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
-            echo "bumped=false" >> $GITHUB_OUTPUT
-            exit 0
+            if git diff-tree --no-commit-id --name-only -r HEAD | grep -q 'db/migration/.*\.sql$'; then
+              BUMP_TYPE="patch"
+            elif echo "$COMMIT_MSG" | grep -qiE "(flyway|dbmigration|db-migration)"; then
+              BUMP_TYPE="patch"
+            else
+              echo "No version bump for prefix: ${COMMIT_MSG}"
+              echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
+              echo "bumped=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
           fi
 
           # ──────────────────────────────────────────────────────────────────
@@ -195,7 +205,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pom.xml '**/pom.xml'
-          git commit -m "chore(release): bump to ${NEW_VERSION}"
+          
+          # If bumped due to Flyway schema, note it in commit for traceability
+          if [ "$BUMP_TYPE" = "patch" ] && git diff-tree --no-commit-id --name-only -r HEAD | grep -q 'db/migration/.*\.sql$'; then
+            git commit -m "chore(release): bump to ${NEW_VERSION} [db-migration]"
+          else
+            git commit -m "chore(release): bump to ${NEW_VERSION}"
+          fi
+
           git push
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
