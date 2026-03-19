@@ -127,3 +127,50 @@ jobs:
           fi
 
           echo "No breaking SQL patterns detected. ✅"
+
+      - name: Validate application-migrator.yml config
+        run: |
+          # Search for application-migrator.yml in the repository
+          MIGRATOR_FILE=$(find . -maxdepth 5 -name "application-migrator.yml" | head -n 1)
+          if [ -z "$MIGRATOR_FILE" ]; then
+            echo "No application-migrator.yml found. Skipping migrator safety check."
+            exit 0
+          fi
+          
+          echo "Validating migrator configuration in $MIGRATOR_FILE..."
+          FAIL=0
+          
+          # Check spring.cloud.config.enabled
+          CONFIG_ENABLED=$(yq e '.spring.cloud.config.enabled // "true"' "$MIGRATOR_FILE")
+          if [ "$CONFIG_ENABLED" != "false" ]; then
+            echo "::error file=$MIGRATOR_FILE::Validation failed: spring.cloud.config.enabled must be false"
+            FAIL=1
+          fi
+          
+          # Check eureka.client.enabled
+          EUREKA_ENABLED=$(yq e '.eureka.client.enabled // "true"' "$MIGRATOR_FILE")
+          if [ "$EUREKA_ENABLED" != "false" ]; then
+            echo "::error file=$MIGRATOR_FILE::Validation failed: eureka.client.enabled must be false"
+            FAIL=1
+          fi
+          
+          # Check management.endpoints.enabled-by-default
+          ACTUATOR_ENABLED=$(yq e '.management.endpoints.enabled-by-default // "true"' "$MIGRATOR_FILE")
+          if [ "$ACTUATOR_ENABLED" != "false" ]; then
+            echo "::error file=$MIGRATOR_FILE::Validation failed: management.endpoints.enabled-by-default must be false"
+            FAIL=1
+          fi
+          
+          if [ "$FAIL" -ne 0 ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  MIGRATOR SAFETY CHECK FAILED — PR BLOCKED                 ║"
+            echo "║  The application-migrator.yml MUST explicitly disable:     ║"
+            echo "║  - spring.cloud.config.enabled: false                      ║"
+            echo "║  - eureka.client.enabled: false                            ║"
+            echo "║  - management.endpoints.enabled-by-default: false          ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            exit 1
+          fi
+          
+          echo "Migrator config is safe. ✅"
