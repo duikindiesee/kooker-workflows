@@ -127,3 +127,38 @@ jobs:
           fi
 
           echo "No breaking SQL patterns detected. ✅"
+
+      - name: Validate migrator profile safety
+        run: |
+          # ──────────────────────────────────────────────────────────────────
+          # Ensures application-migrator.yml explicitly disables Spring JVM daemons
+          # so ArgoCD Jobs do not hang infinitely after Flyway completes.
+          # ──────────────────────────────────────────────────────────────────
+          MIGRATOR_CONFIG=$(find . -name "application-migrator.yml" | head -n 1)
+          if [ -n "$MIGRATOR_CONFIG" ]; then
+            echo "Checking $MIGRATOR_CONFIG for mandatory safety properties..."
+            FAIL=0
+            
+            if [ "$(yq '.spring.cloud.config.enabled' "$MIGRATOR_CONFIG")" != "false" ]; then
+              echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'spring.cloud.config.enabled: false'."
+              FAIL=1
+            fi
+            
+            if [ "$(yq '.eureka.client.enabled' "$MIGRATOR_CONFIG")" != "false" ]; then
+              echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'eureka.client.enabled: false'."
+              FAIL=1
+            fi
+            
+            if [ "$(yq '.management.endpoints.enabled-by-default' "$MIGRATOR_CONFIG")" != "false" ]; then
+              echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'management.endpoints.enabled-by-default: false'."
+              FAIL=1
+            fi
+            
+            if [ $FAIL -ne 0 ]; then
+              echo "Migrator profile is unsafe. It will cause Kubernetes sync Jobs to hang indefinitely."
+              exit 1
+            fi
+            echo "Migrator profile passed safely. ✅"
+          else
+            echo "No application-migrator.yml found, skipping safety validation."
+          fi
