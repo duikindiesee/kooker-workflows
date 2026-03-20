@@ -33,4 +33,4 @@ jobs:
           package-type: 'container'
           min-versions-to-keep: 4
           # Use GITHUB_TOKEN which now explicitly has packages: write
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
