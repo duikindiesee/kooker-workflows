@@ -18,6 +18,10 @@ name: GHCR Centralized Retention (4 Versions)
 on:
   workflow_call:
 
+permissions:
+  packages: write
+  contents: read
+
 jobs:
   prune-ghcr:
     runs-on: ubuntu-latest
