@@ -215,5 +215,8 @@ jobs:
 
           git push
 
+          echo "Generating automated GitHub Release v${NEW_VERSION}..."
+          gh release create "v${NEW_VERSION}" --title "Release v${NEW_VERSION}" --generate-notes
+
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT

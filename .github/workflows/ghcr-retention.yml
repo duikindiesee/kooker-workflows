@@ -1,0 +1,32 @@
+# =============================================================================
+# ghcr-retention.yml
+# =============================================================================
+# PURPOSE
+#   Reusable workflow that trims GHCR images to maintain a rolling retention of 
+#   exactly 4 versions. This prevents snapshot feature tags and outdated branches 
+#   from exhausting the organization's physical storage limit incrementally.
+#
+# USAGE (in calling workflow)
+#   jobs:
+#     retention:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/ghcr-retention.yml@main
+#       secrets: inherit
+# =============================================================================
+
+name: GHCR Centralized Retention (4 Versions)
+
+on:
+  workflow_call:
+
+jobs:
+  prune-ghcr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old image tags
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: 'container'
+          min-versions-to-keep: 4
+          # Standard PAT required for destructive package ops in GHCR
+          token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
