@@ -1,0 +1,45 @@
+name: GitOps Sync Deployment
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'The base image name (e.g. ghcr.io/org/repo)'
+        required: true
+        type: string
+      new_tag:
+        description: 'The new tag to deploy (e.g. sha-81df9cb)'
+        required: true
+        type: string
+      kustomize_path:
+        description: 'Path within kooker-infra to the kustomization.yaml directory'
+        required: true
+        type: string
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout kooker-infra
+        uses: actions/checkout@v4
+        with:
+          repository: duikindiesee/kooker-infra
+          token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          path: infra
+
+      - name: Install Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Update Kustomize Image
+        run: |
+          cd infra/${{ inputs.kustomize_path }}
+          kustomize edit set image ${{ inputs.image_name }}=${{ inputs.image_name }}:${{ inputs.new_tag }}
+          
+      - name: Commit and Push Changes
+        run: |
+          cd infra
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
+          git push
