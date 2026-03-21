@@ -17,6 +17,9 @@ name: GHCR Centralized Retention (4 Versions)
 
 on:
   workflow_call:
+    secrets:
+      MAVEN_PUBLISH_TOKEN:
+        required: true
 
 permissions:
   packages: write
