@@ -1,5 +1,5 @@
 # =============================================================================
-# node-version-bump.yml
+# node-version-bump.yml  (v1.5.6)
 # =============================================================================
 # PURPOSE
 #   Reusable workflow that automatically bumps the npm package.json version on
@@ -20,9 +20,18 @@
 #   feat:              → MINOR     →  1.0.3 → 1.1.0
 #   fix: / any other   → PATCH     →  1.0.3 → 1.0.4
 #
+# BRANCH PROTECTION COMPATIBLE (v1.5.6)
+#   Cannot push directly to main — branch protection requires a PR.
+#   Flow:
+#     1. Feature PR merges → version-bump creates chore/bump-X.Y.Z PR
+#     2. Bump PR auto-merges once quality checks pass
+#     3. Second pipeline run hits loop guard → skips bump → Docker build runs
+#        with new version from package.json
+#
 # LOOP PREVENTION
-#   Bump commits use "chore(release):" prefix, detected on the next CI run
-#   to skip bumping. The Docker build still continues in the same run.
+#   Bump PRs use "chore(release):" prefix. On the second run (after bump PR
+#   merges), the loop guard detects this prefix and skips bumping. The Docker
+#   build still runs with the already-bumped version.
 #
 # USAGE (in calling workflow)
 #   jobs:
@@ -35,28 +44,20 @@
 #       needs: version-bump
 #       # use: needs.version-bump.outputs.new-version for Docker tag
 #
-# REQUIRED PERMISSIONS (in calling workflow)
-#   permissions:
-#     contents: write
-#
 # REQUIRED SECRETS
-#   GITHUB_TOKEN — standard token with contents: write
+#   GITHUB_TOKEN — standard token with contents: write, pull-requests: write
 # =============================================================================
 
 name: Node Version Bump (Conventional Commits)
 
 on:
   workflow_call:
-    secrets:
-      MAVEN_PUBLISH_TOKEN:
-        description: 'PAT with bypass rights to push directly to protected main'
-        required: false
     outputs:
       new-version:
         description: "The package.json version after the bump (or unchanged if skipped)"
         value: ${{ jobs.bump.outputs.new-version }}
       bumped:
-        description: "'true' if a version bump was committed, 'false' otherwise"
+        description: "'true' if a version bump PR was created, 'false' otherwise"
         value: ${{ jobs.bump.outputs.bumped }}
 
 jobs:
@@ -64,6 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
 
     outputs:
       new-version: ${{ steps.bump.outputs.new-version }}
@@ -74,14 +76,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.MAVEN_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Detect bump type and apply version
+      - name: Detect bump type and write version to package.json
         id: bump
         run: |
           set -euo pipefail
@@ -90,7 +92,8 @@ jobs:
 
           # ──────────────────────────────────────────────────────────────────
           # LOOP GUARD
-          # If this commit is itself a release bump, skip to prevent infinite loop.
+          # If this commit is a release bump PR merge, skip bumping entirely.
+          # The build job will still run with the bumped version on main.
           # ──────────────────────────────────────────────────────────────────
           if echo "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
             echo "Release commit detected — skipping bump to prevent infinite loop."
@@ -137,35 +140,56 @@ jobs:
           echo "New version: ${NEW_VERSION}  bump: ${BUMP_TYPE}"
 
           # ──────────────────────────────────────────────────────────────────
-          # WRITE NEW VERSION to package.json via npm version
-          # --no-git-tag-version: we manage the git tag ourselves below
+          # WRITE NEW VERSION to package.json
           # ──────────────────────────────────────────────────────────────────
           npm version "${NEW_VERSION}" --no-git-tag-version --allow-same-version
 
-          # ──────────────────────────────────────────────────────────────────
-          # COMMIT AND PUSH
-          # ──────────────────────────────────────────────────────────────────
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          PAT="${{ secrets.MAVEN_PUBLISH_TOKEN }}"
-          if [ -n "$PAT" ]; then
-            git remote set-url origin "https://x-access-token:${PAT}@github.com/${GITHUB_REPOSITORY}.git"
-          fi
           git add package.json package-lock.json 2>/dev/null || git add package.json
           git commit -m "chore(release): bump to ${NEW_VERSION}"
-          git push
-
-          # ──────────────────────────────────────────────────────────────────
-          # CREATE GITHUB RELEASE (only on main)
-          # ──────────────────────────────────────────────────────────────────
-          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            echo "Creating GitHub Release v${NEW_VERSION}..."
-            gh release create "v${NEW_VERSION}" \
-              --title "Release v${NEW_VERSION}" \
-              --generate-notes
-          fi
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ────────────────────────────────────────────────────────────────────────
+      # CREATE PR for the bump commit (branch-protection compatible)
+      # The PR auto-merges once quality checks pass → second pipeline run →
+      # loop guard skips bump → Docker build runs with new version.
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Create version-bump pull request
+        id: create-pr
+        if: steps.bump.outputs.bumped == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: "chore/bump-${{ steps.bump.outputs.new-version }}"
+          title: "chore(release): bump to ${{ steps.bump.outputs.new-version }}"
+          body: |
+            Automated version bump to `${{ steps.bump.outputs.new-version }}`.
+
+            Created automatically by the CI pipeline.
+            Will auto-merge once status checks pass.
+          labels: "automated,version-bump"
+          delete-branch: true
+
+      - name: Enable auto-merge on bump PR
+        if: steps.create-pr.outputs.pull-request-number != ''
+        run: |
+          gh pr merge "${{ steps.create-pr.outputs.pull-request-number }}" \
+            --auto --squash \
+            --repo "${GITHUB_REPOSITORY}"
+          echo "Auto-merge enabled on PR #${{ steps.create-pr.outputs.pull-request-number }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.bumped == 'true'
+        run: |
+          gh release create "v${{ steps.bump.outputs.new-version }}" \
+            --title "Release v${{ steps.bump.outputs.new-version }}" \
+            --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

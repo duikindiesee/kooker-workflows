@@ -79,7 +79,8 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to push the bump commit back to the branch
+      contents: write
+      pull-requests: write  # needed to push the bump commit back to the branch
 
     outputs:
       new-version: ${{ steps.bump.outputs.new-version }}
@@ -206,14 +207,45 @@ jobs:
             git commit -m "chore(release): bump to ${NEW_VERSION}"
           fi
 
-          git push
-
-          if [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF}" = "refs/heads/master" ]; then
-            echo "Generating automated GitHub Release v${NEW_VERSION}..."
-            gh release create "v${NEW_VERSION}" --title "Release v${NEW_VERSION}" --generate-notes
-          else
-            echo "Skipping GitHub Release generation since not on main branch (${GITHUB_REF})"
-          fi
-
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ──────────────────────────────────────────────────────────────────────
+      # CREATE PR — branch protection compatible (v1.5.6)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Create version-bump pull request
+        id: create-pr
+        if: steps.bump.outputs.bumped == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: "chore/bump-${{ steps.bump.outputs.new-version }}"
+          title: "chore(release): bump to ${{ steps.bump.outputs.new-version }}"
+          body: |
+            Automated version bump to `${{ steps.bump.outputs.new-version }}`.
+
+            Created automatically by the CI pipeline.
+            Will auto-merge once status checks pass.
+          labels: "automated,version-bump"
+          delete-branch: true
+
+      - name: Enable auto-merge on bump PR
+        if: steps.create-pr.outputs.pull-request-number != ''
+        run: |
+          gh pr merge "${{ steps.create-pr.outputs.pull-request-number }}" \
+            --auto --squash \
+            --repo "${GITHUB_REPOSITORY}"
+          echo "Auto-merge enabled on PR #${{ steps.create-pr.outputs.pull-request-number }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.bumped == 'true'
+        run: |
+          gh release create "v${{ steps.bump.outputs.new-version }}" \
+            --title "Release v${{ steps.bump.outputs.new-version }}" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
