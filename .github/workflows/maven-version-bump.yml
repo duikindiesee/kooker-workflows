@@ -108,9 +108,6 @@ jobs:
 
       - name: Detect bump type and apply version
         id: bump
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
         run: |
           COMMIT_MSG="${{ github.event.head_commit.message }}"
           echo "=== Commit: ${COMMIT_MSG}"
