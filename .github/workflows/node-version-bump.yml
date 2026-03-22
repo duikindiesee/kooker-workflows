@@ -47,6 +47,10 @@ name: Node Version Bump (Conventional Commits)
 
 on:
   workflow_call:
+    secrets:
+      MAVEN_PUBLISH_TOKEN:
+        description: 'PAT with bypass rights to push directly to protected main'
+        required: false
     outputs:
       new-version:
         description: "The package.json version after the bump (or unchanged if skipped)"
@@ -70,7 +74,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          token: ${{ secrets.MAVEN_PUBLISH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -143,7 +147,10 @@ jobs:
           # ──────────────────────────────────────────────────────────────────
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${{ secrets.MAVEN_PUBLISH_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git"
+          PAT="${{ secrets.MAVEN_PUBLISH_TOKEN }}"
+          if [ -n "$PAT" ]; then
+            git remote set-url origin "https://x-access-token:${PAT}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
           git add package.json package-lock.json 2>/dev/null || git add package.json
           git commit -m "chore(release): bump to ${NEW_VERSION}"
           git push
