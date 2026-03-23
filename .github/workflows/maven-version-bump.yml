@@ -208,6 +208,8 @@ jobs:
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
         env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ──────────────────────────────────────────────────────────────────────
