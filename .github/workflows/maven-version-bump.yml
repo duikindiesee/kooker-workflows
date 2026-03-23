@@ -195,7 +195,8 @@ jobs:
           # ──────────────────────────────────────────────────────────────────
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pom.xml '**/pom.xml'
+          # Add all pom.xml files; using find to avoid exit 128 on single-module repos
+          find . -name "pom.xml" -not -path "./.git/*" | xargs git add
           
           # If bumped due to Flyway schema, note it in commit for traceability
           if [ "$BUMP_TYPE" = "patch" ] && git diff-tree --no-commit-id --name-only -r HEAD | grep -q 'db/migration/.*\.sql$'; then
