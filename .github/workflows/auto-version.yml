@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   tag:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, local-linux]
     # Serialise tag creation per-repo to prevent two concurrent merges computing
     # the same version tag and racing on 'git push origin $TAG'.
     # cancel-in-progress: false ensures the second run waits rather than dying.
