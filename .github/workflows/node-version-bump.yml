@@ -147,14 +147,19 @@ jobs:
           # ──────────────────────────────────────────────────────────────────
           # PRETTIER FORMATTING (Format-on-Merge Strategy)
           # ──────────────────────────────────────────────────────────────────
-          echo "Auto-formatting code using Prettier..."
-          npx -y prettier --write . --ignore-path .gitignore || true
+          echo "Auto-formatting tracked source files using Prettier..."
+          FORMAT_TARGETS="$(git ls-files '*.js' '*.jsx' '*.ts' '*.tsx' '*.mjs' '*.cjs' '*.json' '*.yml' '*.yaml' '*.md' '*.css' '*.scss' 2>/dev/null || true)"
+          if [ -n "${FORMAT_TARGETS}" ]; then
+            npm exec --yes --package prettier@3.3.3 prettier -- --write ${FORMAT_TARGETS} --ignore-path .gitignore
+          else
+            echo "No tracked files matched Prettier patterns; skipping formatting."
+          fi
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add package.json package-lock.json 2>/dev/null || git add package.json
-          # Also stage any files formatted by Prettier
-          git add .
+          # Also stage any modified tracked files (including those formatted by Prettier)
+          git add -u
           git commit -m "chore(release): bump to ${NEW_VERSION} and format code"
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
