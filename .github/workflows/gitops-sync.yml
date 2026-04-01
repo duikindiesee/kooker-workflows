@@ -34,7 +34,7 @@ jobs:
           ref: ${{ inputs.target_branch }}
 
       - name: Install Kustomize
-        uses: imranismail/setup-kustomize@v2
+        uses: imranismail/setup-kustomize@v3
 
       - name: Update Kustomize Image
         run: |
