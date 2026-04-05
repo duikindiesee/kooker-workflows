@@ -1,0 +1,138 @@
+name: Neo4j Delta Cache
+
+# Reusable workflow — call this from any repo's main push to cache changed files into Neo4j.
+# This powers Joe's (JoeHermesBot on Mac Mini 2) memory search and irwins_memory_bank graph queries.
+#
+# Usage in calling workflow:
+#   jobs:
+#     neo4j-cache:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/neo4j-delta-cache.yml@main
+#       secrets: inherit
+#       with:
+#         repo-name: 'kooker-infra'   # optional
+
+on:
+  workflow_call:
+    inputs:
+      repo-name:
+        description: "Override repo name stored in graph (defaults to caller's github.repository basename)"
+        required: false
+        type: string
+    secrets:
+      NEO4J_PASSWORD:
+        description: "Neo4j HTTP password (stored as repo/org secret NEO4J_PASSWORD)"
+        required: true
+
+jobs:
+  cache-delta:
+    name: Cache delta to Neo4j
+    runs-on: [self-hosted, local-linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Resolve changed files
+        id: meta
+        run: |
+          REPO_INPUT="${{ inputs.repo-name }}"
+          REPO_NAME="${REPO_INPUT:-${GITHUB_REPOSITORY##*/}}"
+          SHA="${{ github.sha }}"
+          PARENT="${{ github.event.before }}"
+          MSG="$(git log -1 --pretty=%s)"
+
+          echo "repo=$REPO_NAME"   >> $GITHUB_OUTPUT
+          echo "sha=$SHA"          >> $GITHUB_OUTPUT
+          echo "message=$MSG"      >> $GITHUB_OUTPUT
+
+          # Delta: files changed between parent and this commit
+          if git cat-file -e "$PARENT^{commit}" 2>/dev/null; then
+            git diff --name-only "$PARENT" "$SHA" > /tmp/changed_files.txt
+          else
+            # First commit or force-push — index everything
+            git ls-files > /tmp/changed_files.txt
+          fi
+
+          echo "Files to cache: $(wc -l < /tmp/changed_files.txt)"
+          cat /tmp/changed_files.txt
+
+      - name: Upsert Commit node
+        env:
+          NEO4J_URL: "http://neo4j.kooker.co.za"
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          REPO="${{ steps.meta.outputs.repo }}"
+          SHA="${{ steps.meta.outputs.sha }}"
+          MSG="${{ steps.meta.outputs.message }}"
+          TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+            -H "Content-Type: application/json" \
+            -u "neo4j:$NEO4J_PASS" \
+            -d "{\"statements\":[{
+              \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (c:Commit {sha:\$sha}) SET c.message=\$msg, c.ts=\$ts, c.repo=\$repo MERGE (r)-[:HAS_COMMIT]->(c)\",
+              \"parameters\": {\"repo\":\"$REPO\",\"sha\":\"$SHA\",\"msg\":\"$(echo $MSG | sed 's/\"/\\\"/g')\",\"ts\":\"$TS\"}
+            }]}"
+
+      - name: Cache changed files
+        env:
+          NEO4J_URL: "http://neo4j.kooker.co.za"
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          REPO="${{ steps.meta.outputs.repo }}"
+          SHA="${{ steps.meta.outputs.sha }}"
+
+          while IFS= read -r fp; do
+            [ -z "$fp" ] && continue
+            EXT="${fp##*.}"
+
+            # Knowledge-relevant file types only
+            case "$EXT" in
+              md|adoc|yaml|yml|java|ts|tsx|json|py|sh|kt|xml) ;;
+              *) continue ;;
+            esac
+
+            # Embed content for small docs/configs (< 50KB)
+            CONTENT_JSON='""'
+            if [ -f "$fp" ]; then
+              SIZE=$(wc -c < "$fp")
+              if [ "$SIZE" -lt 51200 ]; then
+                CONTENT_JSON=$(python3 -c "import sys,json; print(json.dumps(open('$fp').read()))" 2>/dev/null || echo '""')
+              fi
+            fi
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "neo4j:$NEO4J_PASS" \
+              -d "{\"statements\":[{
+                \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (f:File {path:\$path,repo:\$repo}) SET f.ext=\$ext, f.sha=\$sha, f.content=\$content MERGE (r)-[:CONTAINS]->(f) WITH f MATCH (c:Commit {sha:\$sha}) MERGE (f)-[:CHANGED_IN]->(c)\",
+                \"parameters\": {\"repo\":\"$REPO\",\"path\":\"$fp\",\"ext\":\"$EXT\",\"sha\":\"$SHA\",\"content\":$CONTENT_JSON}
+              }]}")
+
+            echo "$HTTP_CODE $fp"
+          done < /tmp/changed_files.txt
+
+      # Special node: irwins_memory_bank — this is what Joe queries for context
+      - name: Sync Memory Bank node
+        if: ${{ hashFiles('docs/irwins_memory_bank.md') != '' }}
+        env:
+          NEO4J_URL: "http://neo4j.kooker.co.za"
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          if grep -q "irwins_memory_bank" /tmp/changed_files.txt 2>/dev/null; then
+            echo "Memory bank changed — updating :Memory node in graph..."
+            CONTENT=$(python3 -c "import json; print(json.dumps(open('docs/irwins_memory_bank.md').read()))")
+            TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "neo4j:$NEO4J_PASS" \
+              -d "{\"statements\":[{
+                \"statement\": \"MERGE (m:Memory {name:'irwins_memory_bank'}) SET m.content=\$c, m.updatedAt=\$ts\",
+                \"parameters\": {\"c\":$CONTENT,\"ts\":\"$TS\"}
+              }]}"
+            echo "Memory node updated."
+          else
+            echo "Memory bank unchanged — skipping."
+          fi
