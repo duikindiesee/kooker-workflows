@@ -1,0 +1,158 @@
+name: Neo4j Delta Cache
+
+# Reusable workflow — call from any repo's push-to-main to delta-sync changed files into Neo4j.
+# All connection details are passed as inputs/secrets by the caller — nothing infrastructure-specific
+# is hardcoded here so this public repo stays clean.
+#
+# Usage:
+#   jobs:
+#     neo4j-cache:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/neo4j-delta-cache.yml@main
+#       secrets: inherit
+#       with:
+#         neo4j_base_url: ${{ vars.NEO4J_BASE_URL }}
+#         repo_name: 'kooker-infra'
+
+on:
+  workflow_call:
+    inputs:
+      neo4j_base_url:
+        description: "Neo4j HTTP base URL (e.g. https://neo4j.example.com)"
+        required: true
+        type: string
+      repo_name:
+        description: "Repo label stored in graph (defaults to caller's repo basename)"
+        required: false
+        type: string
+      base_sha:
+        description: "Base commit SHA for diff (defaults to github.event.before)"
+        required: false
+        type: string
+      head_sha:
+        description: "Head commit SHA (defaults to github.sha)"
+        required: false
+        type: string
+      commit_message:
+        description: "Commit message override"
+        required: false
+        type: string
+    secrets:
+      NEO4J_USERNAME:
+        description: "Neo4j username"
+        required: true
+      NEO4J_PASSWORD:
+        description: "Neo4j password"
+        required: true
+
+jobs:
+  cache-delta:
+    name: Cache delta to Neo4j
+    runs-on: [self-hosted, local-linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Resolve metadata
+        id: meta
+        run: |
+          REPO_INPUT="${{ inputs.repo_name }}"
+          REPO_NAME="${REPO_INPUT:-${GITHUB_REPOSITORY##*/}}"
+          SHA="${{ inputs.head_sha || github.sha }}"
+          PARENT="${{ inputs.base_sha || github.event.before }}"
+          MSG="${{ inputs.commit_message || github.event.head_commit.message }}"
+          TS="${{ github.event.head_commit.timestamp || '$(date -u +%Y-%m-%dT%H:%M:%SZ)' }}"
+
+          echo "repo=$REPO_NAME"   >> $GITHUB_OUTPUT
+          echo "sha=$SHA"          >> $GITHUB_OUTPUT
+          echo "parent=$PARENT"    >> $GITHUB_OUTPUT
+          echo "message=$MSG"      >> $GITHUB_OUTPUT
+          echo "ts=$TS"            >> $GITHUB_OUTPUT
+
+          # Delta: only files changed between parent and current commit
+          if git cat-file -e "$PARENT^{commit}" 2>/dev/null; then
+            git diff --name-only "$PARENT" "$SHA" > /tmp/changed_files.txt
+          else
+            git ls-files > /tmp/changed_files.txt
+          fi
+
+          echo "Files to cache: $(wc -l < /tmp/changed_files.txt)"
+          cat /tmp/changed_files.txt
+
+      - name: Upsert Commit node
+        env:
+          NEO4J_URL: ${{ inputs.neo4j_base_url }}
+          NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          REPO="${{ steps.meta.outputs.repo }}"
+          SHA="${{ steps.meta.outputs.sha }}"
+          MSG="${{ steps.meta.outputs.message }}"
+          TS="${{ steps.meta.outputs.ts }}"
+
+          curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+            -H "Content-Type: application/json" \
+            -u "$NEO4J_USER:$NEO4J_PASS" \
+            -d "{\"statements\":[{
+              \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (c:Commit {sha:\$sha}) SET c.message=\$msg, c.ts=\$ts, c.repo=\$repo MERGE (r)-[:HAS_COMMIT]->(c)\",
+              \"parameters\": {\"repo\":\"$REPO\",\"sha\":\"$SHA\",\"msg\":\"$(echo "$MSG" | sed 's/\"/\\\"/g')\",\"ts\":\"$TS\"}
+            }]}"
+
+      - name: Cache changed files
+        env:
+          NEO4J_URL: ${{ inputs.neo4j_base_url }}
+          NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          REPO="${{ steps.meta.outputs.repo }}"
+          SHA="${{ steps.meta.outputs.sha }}"
+
+          while IFS= read -r fp; do
+            [ -z "$fp" ] && continue
+            EXT="${fp##*.}"
+            case "$EXT" in
+              md|adoc|yaml|yml|java|ts|tsx|json|py|sh|kt|xml) ;;
+              *) continue ;;
+            esac
+
+            CONTENT_JSON='""'
+            if [ -f "$fp" ]; then
+              SIZE=$(wc -c < "$fp")
+              if [ "$SIZE" -lt 51200 ]; then
+                CONTENT_JSON=$(python3 -c "import json; print(json.dumps(open('$fp').read()))" 2>/dev/null || echo '""')
+              fi
+            fi
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "$NEO4J_USER:$NEO4J_PASS" \
+              -d "{\"statements\":[{
+                \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (f:File {path:\$path,repo:\$repo}) SET f.ext=\$ext, f.sha=\$sha, f.content=\$content MERGE (r)-[:CONTAINS]->(f) WITH f MATCH (c:Commit {sha:\$sha}) MERGE (f)-[:CHANGED_IN]->(c)\",
+                \"parameters\": {\"repo\":\"$REPO\",\"path\":\"$fp\",\"ext\":\"$EXT\",\"sha\":\"$SHA\",\"content\":$CONTENT_JSON}
+              }]}")
+            echo "$HTTP_CODE $fp"
+          done < /tmp/changed_files.txt
+
+      - name: Sync Memory Bank node (if changed)
+        if: ${{ hashFiles('docs/irwins_memory_bank.md') != '' }}
+        env:
+          NEO4J_URL: ${{ inputs.neo4j_base_url }}
+          NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          if grep -q "irwins_memory_bank" /tmp/changed_files.txt 2>/dev/null; then
+            echo "Memory bank changed — updating :Memory node..."
+            CONTENT=$(python3 -c "import json; print(json.dumps(open('docs/irwins_memory_bank.md').read()))")
+            TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "$NEO4J_USER:$NEO4J_PASS" \
+              -d "{\"statements\":[{
+                \"statement\": \"MERGE (m:Memory {name:'irwins_memory_bank'}) SET m.content=\$c, m.updatedAt=\$ts\",
+                \"parameters\": {\"c\":$CONTENT,\"ts\":\"$TS\"}
+              }]}"
+            echo "Done."
+          else
+            echo "Memory bank unchanged — skipping."
+          fi
