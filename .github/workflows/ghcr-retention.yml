@@ -3,7 +3,7 @@
 # =============================================================================
 # PURPOSE
 #   Reusable workflow that trims GHCR images to maintain a rolling retention of 
-#   exactly 4 versions. This prevents snapshot feature tags and outdated branches 
+#   at least 15 versions. This prevents snapshot feature tags and outdated branches 
 #   from exhausting the organization's physical storage limit incrementally.
 #
 # USAGE (in calling workflow)
@@ -13,7 +13,7 @@
 #       secrets: inherit
 # =============================================================================
 
-name: GHCR Centralized Retention (4 Versions)
+name: GHCR Centralized Retention (15 Versions)
 
 on:
   workflow_call:
@@ -33,6 +33,6 @@ jobs:
         with:
           package-name: ${{ github.event.repository.name }}
           package-type: 'container'
-          min-versions-to-keep: 4
+          min-versions-to-keep: 15
           # Standard PAT required for destructive package ops in GHCR
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
