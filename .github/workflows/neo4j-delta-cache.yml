@@ -47,7 +47,7 @@ on:
 jobs:
   cache-delta:
     name: Cache delta to Neo4j
-    runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4

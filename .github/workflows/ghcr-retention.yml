@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   prune-ghcr:
-    runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Prune old image tags
         uses: actions/delete-package-versions@v5

@@ -23,7 +23,7 @@ on:
 
 jobs:
   sync:
-    runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout kooker-infra
         uses: actions/checkout@v4

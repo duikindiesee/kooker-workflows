@@ -73,7 +73,7 @@ on:
 
 jobs:
   bump:
-    runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     permissions:
       contents: write  # needed to push the bump commit back to the branch
 
