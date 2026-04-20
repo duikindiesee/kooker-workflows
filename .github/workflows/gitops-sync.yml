@@ -49,5 +49,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
-          git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
+            git pull --rebase origin ${{ inputs.target_branch }} || true
+            git push origin ${{ inputs.target_branch }}
+          fi
