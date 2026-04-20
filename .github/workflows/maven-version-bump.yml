@@ -79,7 +79,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   bump:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, local-linux]
     permissions:
       contents: write
       pull-requests: write  # needed to push the bump commit back to the branch
