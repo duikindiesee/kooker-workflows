@@ -20,6 +20,8 @@ on:
         description: "'true' if new/modified migration files were found in this PR"
         value: ${{ jobs.lint.outputs.has_db_changes }}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   lint:
     runs-on: ubuntu-latest

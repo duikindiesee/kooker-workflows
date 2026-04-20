@@ -75,6 +75,8 @@ on:
         description: "'true' if a version bump was committed, 'false' otherwise"
         value: ${{ jobs.bump.outputs.bumped }}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   bump:
     runs-on: ubuntu-latest

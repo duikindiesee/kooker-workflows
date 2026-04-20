@@ -6,6 +6,8 @@ on:
       KOOKER_GRAFANA_PAT:
         required: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   load-grafana:
     runs-on: windows-latest

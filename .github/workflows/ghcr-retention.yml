@@ -24,6 +24,8 @@ on:
 permissions:
   packages: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   prune-ghcr:
     runs-on: ubuntu-latest
