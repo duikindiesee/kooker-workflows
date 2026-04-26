@@ -93,13 +93,22 @@ jobs:
           MSG="${{ steps.meta.outputs.message }}"
           TS="${{ steps.meta.outputs.ts }}"
 
+          PAYLOAD=$(jq -n \
+            --arg repo "$REPO" \
+            --arg sha "$SHA" \
+            --arg msg "$MSG" \
+            --arg ts "$TS" \
+            '{
+              statements: [{
+                statement: "MERGE (r:Repo {name:$repo}) MERGE (c:Commit {sha:$sha}) SET c.message=$msg, c.ts=$ts, c.repo=$repo MERGE (r)-[:HAS_COMMIT]->(c)",
+                parameters: {repo: $repo, sha: $sha, msg: $msg, ts: $ts}
+              }]
+            }')
+
           curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
             -H "Content-Type: application/json" \
             -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "{\"statements\":[{
-              \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (c:Commit {sha:\$sha}) SET c.message=\$msg, c.ts=\$ts, c.repo=\$repo MERGE (r)-[:HAS_COMMIT]->(c)\",
-              \"parameters\": {\"repo\":\"$REPO\",\"sha\":\"$SHA\",\"msg\":\"$(echo "$MSG" | sed 's/\"/\\\"/g')\",\"ts\":\"$TS\"}
-            }]}"
+            -d "$PAYLOAD"
 
       - name: Cache changed files
         env:
@@ -126,13 +135,23 @@ jobs:
               fi
             fi
 
+            PAYLOAD=$(jq -n \
+              --arg repo "$REPO" \
+              --arg path "$fp" \
+              --arg ext "$EXT" \
+              --arg sha "$SHA" \
+              --argjson content "$CONTENT_JSON" \
+              '{
+                statements: [{
+                  statement: "MERGE (r:Repo {name:$repo}) MERGE (f:File {path:$path,repo:$repo}) SET f.ext=$ext, f.sha=$sha, f.content=$content MERGE (r)-[:CONTAINS]->(f) WITH f MATCH (c:Commit {sha:$sha}) MERGE (f)-[:CHANGED_IN]->(c)",
+                  parameters: {repo: $repo, path: $path, ext: $ext, sha: $sha, content: $content}
+                }]
+              }')
+
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
               -H "Content-Type: application/json" \
               -u "$NEO4J_USER:$NEO4J_PASS" \
-              -d "{\"statements\":[{
-                \"statement\": \"MERGE (r:Repo {name:\$repo}) MERGE (f:File {path:\$path,repo:\$repo}) SET f.ext=\$ext, f.sha=\$sha, f.content=\$content MERGE (r)-[:CONTAINS]->(f) WITH f MATCH (c:Commit {sha:\$sha}) MERGE (f)-[:CHANGED_IN]->(c)\",
-                \"parameters\": {\"repo\":\"$REPO\",\"path\":\"$fp\",\"ext\":\"$EXT\",\"sha\":\"$SHA\",\"content\":$CONTENT_JSON}
-              }]}")
+              -d "$PAYLOAD")
             echo "$HTTP_CODE $fp"
           done < /tmp/changed_files.txt
 
@@ -147,13 +166,20 @@ jobs:
             echo "Memory bank changed — updating :Memory node..."
             CONTENT=$(python3 -c "import json; print(json.dumps(open('docs/irwins_memory_bank.md').read()))")
             TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            PAYLOAD=$(jq -n \
+              --argjson c "$CONTENT" \
+              --arg ts "$TS" \
+              '{
+                statements: [{
+                  statement: "MERGE (m:Memory {name:'\''irwins_memory_bank'\''}) SET m.content=$c, m.updatedAt=$ts",
+                  parameters: {c: $c, ts: $ts}
+                }]
+              }')
+
             curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
               -H "Content-Type: application/json" \
               -u "$NEO4J_USER:$NEO4J_PASS" \
-              -d "{\"statements\":[{
-                \"statement\": \"MERGE (m:Memory {name:'irwins_memory_bank'}) SET m.content=\$c, m.updatedAt=\$ts\",
-                \"parameters\": {\"c\":$CONTENT,\"ts\":\"$TS\"}
-              }]}"
+              -d "$PAYLOAD"
             echo "Done."
           else
             echo "Memory bank unchanged — skipping."
