@@ -105,10 +105,15 @@ jobs:
               }]
             }')
 
-          curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+          RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
             -H "Content-Type: application/json" \
             -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD")
+          if echo "$RESPONSE" | grep -q '"errors":\['; then
+            echo "Neo4j Error:" >&2
+            echo "$RESPONSE" | jq '.errors' >&2
+            exit 1
+          fi
 
       - name: Cache changed files
         env:
@@ -176,10 +181,15 @@ jobs:
                 }]
               }')
 
-            curl -sf -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
-              -H "Content-Type: application/json" \
-              -u "$NEO4J_USER:$NEO4J_PASS" \
-              -d "$PAYLOAD"
+            RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+            -H "Content-Type: application/json" \
+            -u "$NEO4J_USER:$NEO4J_PASS" \
+            -d "$PAYLOAD")
+          if echo "$RESPONSE" | grep -q '"errors":\['; then
+            echo "Neo4j Error:" >&2
+            echo "$RESPONSE" | jq '.errors' >&2
+            exit 1
+          fi
             echo "Done."
           else
             echo "Memory bank unchanged — skipping."
