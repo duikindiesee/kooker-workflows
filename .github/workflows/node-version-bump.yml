@@ -89,8 +89,8 @@ jobs:
         id: bump
         run: |
           set -euo pipefail
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          echo "=== Commit: ${COMMIT_MSG}"
+          COMMIT_SUBJECT="$(printf '%s' "${COMMIT_MSG}" | sed -n '1p')"
+          printf '=== Commit: %s\n' "${COMMIT_SUBJECT}"
 
           # ──────────────────────────────────────────────────────────────────
           # LOOP GUARD
@@ -167,6 +167,7 @@ jobs:
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
         env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ────────────────────────────────────────────────────────────────────────

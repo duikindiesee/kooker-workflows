@@ -94,11 +94,10 @@ jobs:
       - name: Detect bump type and apply version
         id: bump
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          APP_DIR="${{ inputs.app-dir }}"
+          COMMIT_SUBJECT="$(printf '%s' "${COMMIT_MSG}" | sed -n '1p')"
           BUILD_GRADLE="${APP_DIR}/app/build.gradle"
 
-          echo "=== Commit  : ${COMMIT_MSG}"
+          printf '=== Commit  : %s\n' "${COMMIT_SUBJECT}"
           echo "=== App dir : ${APP_DIR}"
           echo "=== Gradle  : ${BUILD_GRADLE}"
 
@@ -146,7 +145,7 @@ jobs:
           fi
 
           if [ "$BUMP_TYPE" = "none" ]; then
-            echo "No version bump for prefix: ${COMMIT_MSG}"
+            echo "No version bump for prefix: ${COMMIT_SUBJECT}"
             echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
             echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))" >> $GITHUB_OUTPUT
             echo "bumped=false" >> $GITHUB_OUTPUT
@@ -186,3 +185,6 @@ jobs:
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "new-version-code=${NEW_CODE}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
+        env:
+          APP_DIR: ${{ inputs.app-dir }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}

@@ -111,8 +111,8 @@ jobs:
       - name: Detect bump type and apply version
         id: bump
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          echo "=== Commit: ${COMMIT_MSG}"
+          COMMIT_SUBJECT="$(printf '%s' "${COMMIT_MSG}" | sed -n '1p')"
+          printf '=== Commit: %s\n' "${COMMIT_SUBJECT}"
 
           # ──────────────────────────────────────────────────────────────────
           # LOOP GUARD
@@ -210,6 +210,7 @@ jobs:
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
         env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

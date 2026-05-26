@@ -59,17 +59,15 @@ jobs:
       - name: Resolve metadata
         id: meta
         run: |
-          REPO_INPUT="${{ inputs.repo_name }}"
           REPO_NAME="${REPO_INPUT:-${GITHUB_REPOSITORY##*/}}"
-          SHA="${{ inputs.head_sha || github.sha }}"
-          PARENT="${{ inputs.base_sha || github.event.before }}"
-          MSG="${{ inputs.commit_message || github.event.head_commit.message }}"
-          TS="${{ github.event.head_commit.timestamp || '$(date -u +%Y-%m-%dT%H:%M:%SZ)' }}"
+          SHA="${HEAD_SHA}"
+          PARENT="${BASE_SHA}"
+          TS="${COMMIT_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+          printf '%s' "${COMMIT_MSG}" > /tmp/commit_message.txt
 
           echo "repo=$REPO_NAME"   >> $GITHUB_OUTPUT
           echo "sha=$SHA"          >> $GITHUB_OUTPUT
           echo "parent=$PARENT"    >> $GITHUB_OUTPUT
-          echo "message=$MSG"      >> $GITHUB_OUTPUT
           echo "ts=$TS"            >> $GITHUB_OUTPUT
 
           # Delta: only files changed between parent and current commit
@@ -81,6 +79,12 @@ jobs:
 
           echo "Files to cache: $(wc -l < /tmp/changed_files.txt)"
           cat /tmp/changed_files.txt
+        env:
+          BASE_SHA: ${{ inputs.base_sha || github.event.before }}
+          COMMIT_MSG: ${{ inputs.commit_message || github.event.head_commit.message }}
+          COMMIT_TS: ${{ github.event.head_commit.timestamp }}
+          HEAD_SHA: ${{ inputs.head_sha || github.sha }}
+          REPO_INPUT: ${{ inputs.repo_name }}
 
       - name: Upsert Commit node
         env:
@@ -90,8 +94,8 @@ jobs:
         run: |
           REPO="${{ steps.meta.outputs.repo }}"
           SHA="${{ steps.meta.outputs.sha }}"
-          MSG="${{ steps.meta.outputs.message }}"
           TS="${{ steps.meta.outputs.ts }}"
+          MSG="$(cat /tmp/commit_message.txt)"
 
           PAYLOAD=$(jq -n \
             --arg repo "$REPO" \
