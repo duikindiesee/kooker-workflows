@@ -79,7 +79,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   bump:
-    runs-on: [self-hosted, local-linux]
+    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
+    # runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write  # needed to push the bump commit back to the branch
