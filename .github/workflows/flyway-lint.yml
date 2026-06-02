@@ -24,7 +24,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   lint:
-    runs-on: [self-hosted, local-linux]
+    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
+    # runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     outputs:
       has_db_changes: ${{ steps.detect.outputs.has_db_changes }}
 
