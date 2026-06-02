@@ -26,7 +26,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   tag:
-    runs-on: [self-hosted, local-linux]
+    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
+    # runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     # Serialise tag creation per-repo to prevent two concurrent merges computing
     # the same version tag and racing on 'git push origin $TAG'.
     # cancel-in-progress: false ensures the second run waits rather than dying.
