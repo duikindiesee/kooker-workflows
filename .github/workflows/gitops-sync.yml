@@ -25,7 +25,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   sync:
-    runs-on: [self-hosted, local-linux]
+    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
+    # runs-on: [self-hosted, local-linux]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout kooker-infra
         uses: actions/checkout@v4
