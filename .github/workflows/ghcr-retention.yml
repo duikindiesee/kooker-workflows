@@ -17,6 +17,17 @@ name: GHCR Centralized Retention (15 Versions)
 
 on:
   workflow_call:
+    inputs:
+      package-name:
+        description: "GHCR package (image) name to prune. Defaults to the calling repo's name. Pass explicitly when the image name differs from the repo (e.g. kooker-hermes-agent)."
+        required: false
+        type: string
+        default: ""
+      min-versions-to-keep:
+        description: "How many of the newest versions to always keep (use a smaller value for very large images)."
+        required: false
+        type: number
+        default: 15
     secrets:
       MAVEN_PUBLISH_TOKEN:
         required: true
@@ -35,8 +46,8 @@ jobs:
       - name: Prune old image tags
         uses: actions/delete-package-versions@v5
         with:
-          package-name: ${{ github.event.repository.name }}
+          package-name: ${{ inputs.package-name != '' && inputs.package-name || github.event.repository.name }}
           package-type: 'container'
-          min-versions-to-keep: 15
+          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
           # Standard PAT required for destructive package ops in GHCR
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
