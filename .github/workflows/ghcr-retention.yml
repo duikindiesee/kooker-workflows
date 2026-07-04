@@ -2,9 +2,11 @@
 # ghcr-retention.yml
 # =============================================================================
 # PURPOSE
-#   Reusable workflow that trims GHCR images to maintain a rolling retention of 
-#   at least 15 versions. This prevents snapshot feature tags and outdated branches 
-#   from exhausting the organization's physical storage limit incrementally.
+#   Reusable workflow that trims GHCR images while PROTECTING semver release
+#   tags from deletion. Feature and renovate branch snapshots are pruned on a
+#   rolling floor of 60 versions, but GitOps-pinned release images survive —
+#   retention deleting pinned semver manifests caused the 2026-07-03 deploy
+#   outage (pods stuck on a node-cached 1.17.1 after ImagePullBackOff).
 #
 # USAGE (in calling workflow)
 #   jobs:
@@ -13,7 +15,7 @@
 #       secrets: inherit
 # =============================================================================
 
-name: GHCR Centralized Retention (15 Versions)
+name: GHCR Centralized Retention (semver protected)
 
 on:
   workflow_call:
@@ -27,7 +29,12 @@ on:
         description: "How many of the newest versions to always keep (use a smaller value for very large images)."
         required: false
         type: number
-        default: 15
+        default: 60
+      ignore-versions:
+        description: "Regex of version tags that must never be deleted. Defaults to semver and v-semver so GitOps-pinned release images survive retention."
+        required: false
+        type: string
+        default: "^v?[0-9]+\\.[0-9]+\\.[0-9]+$"
     secrets:
       MAVEN_PUBLISH_TOKEN:
         required: true
@@ -49,5 +56,6 @@ jobs:
           package-name: ${{ inputs.package-name != '' && inputs.package-name || github.event.repository.name }}
           package-type: 'container'
           min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
+          ignore-versions: ${{ inputs.ignore-versions }}
           # Standard PAT required for destructive package ops in GHCR
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
