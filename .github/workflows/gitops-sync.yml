@@ -1,5 +1,15 @@
 name: GitOps Sync Deployment
 
+# Deploy pins flow through a PULL REQUEST, never a direct push to main.
+# kooker-infra main is ruleset-protected (changes must come via PR, one
+# approval, author cannot self-approve), so this uses TWO identities:
+#   - MAVEN_PUBLISH_TOKEN  opens the deploy PR (the author)
+#   - GITOPS_APPROVER_TOKEN approves and squash-merges it (the reviewer)
+# The two secrets MUST belong to different accounts, both with write access
+# to kooker-infra — the same no-self-merge rule everyone else lives by.
+# If the approver secret is missing, the PR is left open and this job fails
+# loudly rather than pretending the deploy landed.
+
 on:
   workflow_call:
     inputs:
@@ -16,7 +26,7 @@ on:
         required: true
         type: string
       target_branch:
-        description: 'Branch to checkout and push to in kooker-infra'
+        description: 'Base branch of the deploy PR in kooker-infra'
         required: false
         type: string
         default: 'main'
@@ -44,17 +54,54 @@ jobs:
         run: |
           cd infra/${{ inputs.kustomize_path }}
           kustomize edit set image ${{ inputs.image_name }}=${{ inputs.image_name }}:${{ inputs.new_tag }}
-          
-      - name: Commit and Push Changes
+
+      - name: Open the deploy PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
         run: |
           cd infra
+          if git diff --quiet; then
+            echo "No changes to deploy."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SERVICE=$(basename "${{ inputs.kustomize_path }}")
+          BRANCH="gitops/${SERVICE}-${{ inputs.new_tag }}-${{ github.run_id }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add .
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
-            git pull --rebase origin ${{ inputs.target_branch }} || true
-            git push origin ${{ inputs.target_branch }}
+          git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create \
+            --repo duikindiesee/kooker-infra \
+            --base "${{ inputs.target_branch }}" \
+            --head "$BRANCH" \
+            --title "chore(gitops): auto-deploy ${SERVICE} to ${{ inputs.new_tag }}" \
+            --body "Automated GitOps pin of ${{ inputs.image_name }} to ${{ inputs.new_tag }} at ${{ inputs.kustomize_path }}. Opened by gitops-sync from ${{ github.repository }} run ${{ github.run_id }}; approved and merged by the deploy approver identity.")
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "Opened deploy PR: $PR_URL"
+
+      - name: Approve and merge as the deploy approver
+        if: steps.pr.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_APPROVER_TOKEN }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GITOPS_APPROVER_TOKEN is not set. Deploy PR opened but NOT merged: $PR_URL"
+            exit 1
           fi
+          gh pr review --approve "$PR_URL" --repo duikindiesee/kooker-infra
+          for attempt in 1 2 3; do
+            if gh pr merge "$PR_URL" --repo duikindiesee/kooker-infra --squash --delete-branch; then
+              echo "Deploy PR merged: $PR_URL"
+              exit 0
+            fi
+            echo "Merge attempt $attempt failed, retrying..."
+            sleep 5
+          done
+          echo "::error::Could not merge deploy PR after 3 attempts: $PR_URL"
+          exit 1
