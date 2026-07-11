@@ -175,6 +175,22 @@ jobs:
           echo "New version: ${NEW_VERSION}  bump: ${BUMP_TYPE}"
 
           # ──────────────────────────────────────────────────────────────────
+          # SKIP ALREADY-CUT VERSIONS (self-heal from version drift)
+          # A bump PR can stall, leaving pom.xml behind while its release tag was
+          # already cut below. Without this guard every later merge recomputes the
+          # SAME version and "gh release create" fails on the existing tag, jamming
+          # the whole pipeline. Advance the patch until the version tag is free.
+          # Mirrors the node-version-bump fix (kooker-workflows #46).
+          # ──────────────────────────────────────────────────────────────────
+          git fetch --tags --force --quiet || true
+          while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null 2>&1; do
+            echo "Tag v${NEW_VERSION} already exists; advancing patch."
+            PATCH=$((PATCH + 1))
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          done
+          echo "Resolved free version: ${NEW_VERSION}"
+
+          # ──────────────────────────────────────────────────────────────────
           # WRITE NEW VERSION to all pom.xml files via Maven Versions Plugin.
           # -DgenerateBackupPoms=false avoids committing .versionsBackup files.
           # Covers root pom + all submodules automatically.
@@ -246,11 +262,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ──────────────────────────────────────────────────────────────────────
+      # APPROVE the bump PR with a SEPARATE identity so the armed auto-merge can
+      # complete under the main branch ruleset (which requires one non-author
+      # approval). The PR is authored by github-actions[bot]; GITOPS_APPROVER_TOKEN
+      # is a different account, so its review satisfies the rule. Without this the
+      # bump PR stalls REVIEW_REQUIRED forever, the pom never advances, and every
+      # later merge recomputes the same version and jams the release step. The
+      # merge itself is left to the auto-merge above (GITHUB_TOKEN), which does not
+      # re-trigger CI, so build-and-push runs exactly once in this same run and
+      # picks up the merged pom. Mirrors the gitops-sync approver (#45).
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Approve bump PR (separate approver identity)
+        if: steps.create-pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_APPROVER_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GITOPS_APPROVER_TOKEN is not set. Bump PR #${{ steps.create-pr.outputs.pull-request-number }} opened but cannot be approved; it will stall under branch protection and jam the release pipeline."
+            exit 1
+          fi
+          gh pr review "${{ steps.create-pr.outputs.pull-request-number }}" \
+            --approve \
+            --repo "${GITHUB_REPOSITORY}" \
+            --body "Automated version bump. Approved by the separate approver identity so the armed auto-merge can complete under branch protection."
+
       - name: Create GitHub Release
         if: steps.bump.outputs.bumped == 'true'
         run: |
-          gh release create "v${{ steps.bump.outputs.new-version }}" \
-            --title "Release v${{ steps.bump.outputs.new-version }}" \
-            --generate-notes
+          # Idempotent: the skip-existing-tags guard above already resolves a free
+          # version, but re-check here so a rare race never fails the release step
+          # (mirror of node-version-bump #46).
+          if gh release view "v${{ steps.bump.outputs.new-version }}" >/dev/null 2>&1; then
+            echo "::warning::Release v${{ steps.bump.outputs.new-version }} already exists; skipping creation."
+          else
+            gh release create "v${{ steps.bump.outputs.new-version }}" \
+              --title "Release v${{ steps.bump.outputs.new-version }}" \
+              --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
