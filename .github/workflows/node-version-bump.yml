@@ -1,5 +1,5 @@
 # =============================================================================
-# node-version-bump.yml  (v1.5.6)
+# node-version-bump.yml  (v1.5.7)
 # =============================================================================
 # PURPOSE
 #   Reusable workflow that automatically bumps the npm package.json version on
@@ -151,6 +151,22 @@ jobs:
           echo "New version: ${NEW_VERSION}  bump: ${BUMP_TYPE}"
 
           # ──────────────────────────────────────────────────────────────────
+          # SKIP ALREADY-CUT VERSIONS (self-heal from version drift)
+          # A bump PR can stall on failing CI, leaving package.json behind while
+          # its release tag was already created eagerly below. Without this guard
+          # every later merge recomputes the SAME version and "gh release create"
+          # fails on the existing tag, jamming the whole pipeline (the 0.17.0 and
+          # 0.22.6 incidents). Advance the patch until the version tag is free.
+          # ──────────────────────────────────────────────────────────────────
+          git fetch --tags --force --quiet || true
+          while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null 2>&1; do
+            echo "Tag v${NEW_VERSION} already exists; advancing patch."
+            PATCH=$((PATCH + 1))
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          done
+          echo "Resolved free version: ${NEW_VERSION}"
+
+          # ──────────────────────────────────────────────────────────────────
           # WRITE NEW VERSION to package.json
           # ──────────────────────────────────────────────────────────────────
           npm version "${NEW_VERSION}" --no-git-tag-version --allow-same-version
@@ -225,8 +241,14 @@ jobs:
       - name: Create GitHub Release
         if: steps.bump.outputs.bumped == 'true'
         run: |
-          gh release create "v${{ steps.bump.outputs.new-version }}" \
-            --title "Release v${{ steps.bump.outputs.new-version }}" \
-            --generate-notes
+          # Idempotent: the skip-existing-tags guard above already resolves a free
+          # version, but re-check here so a rare race never fails the release step.
+          if gh release view "v${{ steps.bump.outputs.new-version }}" >/dev/null 2>&1; then
+            echo "::warning::Release v${{ steps.bump.outputs.new-version }} already exists; skipping creation."
+          else
+            gh release create "v${{ steps.bump.outputs.new-version }}" \
+              --title "Release v${{ steps.bump.outputs.new-version }}" \
+              --generate-notes
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
