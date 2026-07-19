@@ -46,9 +46,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   prune-ghcr:
-    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
-    # runs-on: [self-hosted, local-linux]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Prune old image tags
         uses: actions/delete-package-versions@v5
