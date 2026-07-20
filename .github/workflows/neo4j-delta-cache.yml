@@ -49,9 +49,11 @@ env:
 jobs:
   cache-delta:
     name: Cache delta to Neo4j
-    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
-    # runs-on: [self-hosted, local-linux]
-    runs-on: ubuntu-latest
+    # Moved off the GitHub-hosted cloud runner: the org Actions spending limit was blocking every
+    # GitHub-hosted job across several repos. Uses the proven kooker1-org self-hosted pool (see
+    # kooker-infra's org-runner-canary.yml and maven-version-bump.yml/ghcr-retention.yml/
+    # gitops-sync.yml in this repo), not the retired [self-hosted, local-linux] label above.
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
