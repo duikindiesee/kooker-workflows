@@ -1,0 +1,111 @@
+# =============================================================================
+# verify-ghcr-image-fixtures.yml
+# =============================================================================
+# PURPOSE
+#   Proof fixtures for verify-ghcr-image.yml: actually exercise the gate
+#   against one real, currently-published tag (must pass) and one tag that
+#   has never existed (must fail), then assert both outcomes landed the right
+#   way. Static YAML review can't prove a registry-inspection gate behaves
+#   correctly in both directions — this does, on every PR that touches either
+#   workflow, and on demand via workflow_dispatch.
+#
+#   The negative case can't call verify-ghcr-image.yml directly: GitHub
+#   Actions does not allow `continue-on-error` on a job that `uses:` a
+#   reusable workflow (only name/uses/with/secrets/needs/if/permissions are
+#   allowed there — confirmed with actionlint against this exact file), and
+#   without it the intentional failure would permanently red-flag this
+#   workflow as a required check. So the negative case re-runs the identical
+#   underlying command (`docker buildx imagetools inspect`) as an ordinary
+#   step with step-level continue-on-error, then asserts that step failed —
+#   proving the same mechanism the reusable workflow gates on, without the
+#   job itself reporting as a failed/blocking check.
+#
+#   Read-only: `docker buildx imagetools inspect` never mutates the registry.
+# =============================================================================
+
+name: Verify GHCR Image Gate — Proof Fixtures
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/verify-ghcr-image.yml'
+      - '.github/workflows/verify-ghcr-image-fixtures.yml'
+  workflow_dispatch: {}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+jobs:
+  known-good-tag-must-pass:
+    # Routed through the real reusable workflow — proves the whole call
+    # contract (inputs, auth, inspect) works end-to-end for a tag that
+    # genuinely exists.
+    uses: duikindiesee/kooker-workflows/.github/workflows/verify-ghcr-image.yml@main
+    with:
+      image_name: ghcr.io/duikindiesee/kooker-service-user
+      tag: '1.29.4'
+    secrets: inherit
+
+  known-bad-tag-must-fail:
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
+    steps:
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+
+      - name: Set up Buildx for registry inspection
+        uses: docker/setup-buildx-action@v3
+
+      - name: Inspect a tag that was never published (expected to fail)
+        id: inspect
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect \
+            "ghcr.io/duikindiesee/kooker-service-user:0.0.0-verify-ghcr-image-fixture-never-published"
+
+      - name: Assert the inspection actually failed
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.inspect.outcome }}
+        run: |
+          set -euo pipefail
+          echo "inspect step outcome: ${OUTCOME}"
+          if [[ "$OUTCOME" != "failure" ]]; then
+            echo "::error::docker buildx imagetools inspect accepted a tag that was never published (outcome: ${OUTCOME}) — the manifest-existence check is not enforcing."
+            exit 1
+          fi
+          echo "Confirmed: inspecting an absent tag fails, as verify-ghcr-image.yml relies on."
+
+  assert-fixture-outcomes:
+    needs: [known-good-tag-must-pass, known-bad-tag-must-fail]
+    if: always()
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
+    steps:
+      - name: Assert both fixture jobs landed as expected
+        shell: bash
+        env:
+          GOOD_RESULT: ${{ needs.known-good-tag-must-pass.result }}
+          BAD_RESULT: ${{ needs.known-bad-tag-must-fail.result }}
+        run: |
+          set -euo pipefail
+          echo "known-good-tag-must-pass => ${GOOD_RESULT}"
+          echo "known-bad-tag-must-fail  => ${BAD_RESULT}"
+
+          failed=0
+          if [[ "$GOOD_RESULT" != "success" ]]; then
+            echo "::error::verify-ghcr-image.yml rejected ghcr.io/duikindiesee/kooker-service-user:1.29.4, which genuinely exists (result: ${GOOD_RESULT})."
+            failed=1
+          fi
+          if [[ "$BAD_RESULT" != "success" ]]; then
+            echo "::error::the negative fixture job itself did not complete cleanly (result: ${BAD_RESULT}) — see its own steps for detail."
+            failed=1
+          fi
+
+          if [[ "$failed" -ne 0 ]]; then
+            exit 1
+          fi
+          echo "Proof fixtures confirm: the gate passes a real published tag, and inspecting an absent tag fails as the gate relies on."
