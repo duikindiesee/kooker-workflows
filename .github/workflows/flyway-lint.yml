@@ -24,9 +24,10 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   lint:
-    # Migrated to GitHub-hosted cloud runner. Self-hosted runner config preserved below.
-    # runs-on: [self-hosted, local-linux]
-    runs-on: ubuntu-latest
+    # Uses the proven kooker1-org self-hosted pool (see org-runner-canary.yml in kooker-infra and
+    # maven-version-bump.yml/ghcr-retention.yml/gitops-sync.yml in this repo) -- not the retired
+    # [self-hosted, local-linux] label this job was moved off of.
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     outputs:
       has_db_changes: ${{ steps.detect.outputs.has_db_changes }}
 
