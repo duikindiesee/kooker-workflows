@@ -38,8 +38,12 @@ jobs:
   known-good-tag-must-pass:
     # Routed through the real reusable workflow — proves the whole call
     # contract (inputs, auth, inspect) works end-to-end for a tag that
-    # genuinely exists.
-    uses: duikindiesee/kooker-workflows/.github/workflows/verify-ghcr-image.yml@main
+    # genuinely exists. Local `./` reference (not `@main`) so this fixture
+    # exercises the version of the workflow in THIS PR, not whatever is
+    # already on main — a same-repo reusable-workflow call always resolves
+    # against the ref that triggered the run, which a full `owner/repo/...@main`
+    # reference cannot do for a workflow that doesn't exist on main yet.
+    uses: ./.github/workflows/verify-ghcr-image.yml
     with:
       image_name: ghcr.io/duikindiesee/kooker-service-user
       tag: '1.29.4'
