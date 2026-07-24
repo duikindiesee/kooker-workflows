@@ -75,7 +75,7 @@ jobs:
 
     steps:
       - name: Checkout (full history for push)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           # GITHUB_TOKEN is fine for checkout. The branch push that needs the PAT
