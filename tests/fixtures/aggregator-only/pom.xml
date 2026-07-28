@@ -1,0 +1,9 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>za.co.kooker.fixture</groupId>
+    <artifactId>aggregator-only-fixture</artifactId>
+    <version>0.0.1</version>
+    <packaging>pom</packaging>
+    <!-- A pure aggregator/BOM compiles nothing of its own; it must not be
+         required to declare (or be effective-checked for) a Java version. -->
+</project>

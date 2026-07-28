@@ -1,0 +1,8 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>za.co.kooker.fixture</groupId>
+    <artifactId>module-b</artifactId>
+    <version>0.0.1</version>
+    <!-- Default (jar) packaging — this module compiles code but declares
+         NOTHING of its own. Sibling module-a being fine must not mask this. -->
+</project>

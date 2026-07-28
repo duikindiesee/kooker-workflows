@@ -1,0 +1,9 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>za.co.kooker.fixture</groupId>
+    <artifactId>absent-fixture</artifactId>
+    <version>0.0.1</version>
+    <!-- No maven.compiler.release/source/target, no compiler-plugin config, no toolchain.
+         Mirrors a child module that (mistakenly, or intentionally via a parent this
+         script deliberately does not resolve) declares nothing of its own. -->
+</project>
