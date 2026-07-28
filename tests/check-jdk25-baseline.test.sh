@@ -20,10 +20,11 @@ PASS_COUNT=0
 FAIL_COUNT=0
 
 run_guard() {
-  # Runs the guard, capturing stdout+exit code without letting `set -e`
-  # (not set here, but be explicit) abort the test runner on a nonzero exit.
+  # Invoked via `bash "$GUARD"` rather than executing the path directly —
+  # deliberately independent of the file's executable bit, which some
+  # checkouts (e.g. core.fileMode=false, common on Windows) do not preserve.
   local out
-  out="$("$GUARD" "$@" 2>&1)"
+  out="$(bash "$GUARD" "$@" 2>&1)"
   local code=$?
   printf '%s' "$out"
   return "$code"
