@@ -1,0 +1,32 @@
+# =============================================================================
+# self-test.yml
+# =============================================================================
+# PURPOSE
+#   This repository ships reusable workflows and shared scripts consumed by
+#   every other duikindiesee Maven repository — it has no build of its own to
+#   run on push/PR. This workflow is that missing "build": it runs this
+#   repo's own script test suites (currently just
+#   tests/check-jdk25-baseline.test.sh) on every push and pull request, so a
+#   regression in a shared guard is caught here, once, before it can ever
+#   reach a consuming repo.
+# =============================================================================
+
+name: Self Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  script-tests:
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: JDK 25 baseline guard — fixture test suite
+        run: bash tests/check-jdk25-baseline.test.sh

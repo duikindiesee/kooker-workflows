@@ -89,6 +89,42 @@ jobs:
 
 ---
 
+### `jdk25-baseline-guard.yml` — JDK 25 Maven baseline guard
+
+Fails a pull request before any build/package/release work begins when an in-scope Maven project's
+configured `release`/`source`/`target`/toolchain drops below the org baseline (default 25). Two
+layers: a fast offline static scan of committed `pom.xml`/`toolchains.xml` files
+(`scripts/check-jdk25-baseline.sh`, independently unit-tested — run `bash
+tests/check-jdk25-baseline.test.sh`), then — only for a project that declares nothing of its own and
+relies on parent-POM inheritance — a live `mvn help:evaluate` effective-configuration cross-check.
+See [`docs/jdk25-baseline-adoption.md`](docs/jdk25-baseline-adoption.md) for the full repository
+inventory, current compliance state, and the two-layer design rationale.
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `minimum-java-version` | ❌ | `25` | Minimum acceptable Java release/source/target/toolchain version |
+| `workflows-ref` | ❌ | `main` | `kooker-workflows` ref to source the guard script from |
+
+**Outputs:** `result` (`'pass'` / `'fail'`)
+
+**Secrets:** `MAVEN_PUBLISH_TOKEN` — only consulted when the effective-configuration cross-check runs
+(i.e. only for a project that declares nothing of its own), to resolve `kooker-parent-build` from
+GitHub Packages. Same secret `maven-version-bump.yml` already uses for this.
+
+```yaml
+jobs:
+  jdk25-guard:
+    uses: duikindiesee/kooker-workflows/.github/workflows/jdk25-baseline-guard.yml@main
+
+  build:
+    needs: jdk25-guard
+    # ...existing build/package job, unchanged...
+```
+
+---
+
 ### `auto-version.yml` — Auto tag on merge to main
 
 Tags the repo with a semver version on merge. Distinguishes DB-breaking changes (4-part version `vX.Y.Z.N`) from regular patches.

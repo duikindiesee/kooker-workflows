@@ -1,0 +1,9 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>za.co.kooker.fixture</groupId>
+    <artifactId>above-fixture</artifactId>
+    <version>0.0.1</version>
+    <properties>
+        <maven.compiler.release>26</maven.compiler.release>
+    </properties>
+</project>

@@ -1,0 +1,171 @@
+# =============================================================================
+# jdk25-baseline-guard.yml
+# =============================================================================
+# PURPOSE
+#   Fails a pull request before any build/package/release work begins when an
+#   in-scope Maven project's configured Java release/source/target/toolchain
+#   drops below the org baseline (default 25).
+#
+# TWO-LAYER DESIGN (deliberate — see scripts/check-jdk25-baseline.sh header)
+#   1. Static scan (scripts/check-jdk25-baseline.sh, independently unit-tested
+#      offline in tests/check-jdk25-baseline.test.sh): reads every committed
+#      pom.xml/toolchains.xml directly. Fast, deterministic, no network. This
+#      is decisive whenever a file declares SOMETHING: below-minimum or
+#      internally-conflicting declarations fail immediately, no Maven needed.
+#   2. Effective-configuration cross-check (this workflow, inline): several
+#      real Kooker services (e.g. kooker-service-user, kooker-service-ledger)
+#      declare NOTHING in their own pom.xml and inherit maven.compiler.* from
+#      the external kooker-parent-build parent POM. The static scan correctly
+#      reports these ABSENT rather than guessing — this layer resolves the
+#      TRUE effective value via `mvn help:evaluate` against the fully
+#      resolved model (parent inheritance + property interpolation) before
+#      making the final call. This is the literal "effective Maven
+#      compiler/toolchain configuration" half of the required contract.
+#
+# USAGE (in a consuming repo's workflow, BEFORE the build/package job)
+#   jobs:
+#     jdk25-guard:
+#       uses: duikindiesee/kooker-workflows/.github/workflows/jdk25-baseline-guard.yml@main
+#
+#     build:
+#       needs: jdk25-guard
+#       ...
+#
+# REQUIRED SECRETS (only consulted if the effective-configuration cross-check
+# runs, i.e. only when a pom.xml declares nothing of its own)
+#   MAVEN_PUBLISH_TOKEN — PAT for reading kooker-parent-build from GitHub
+#   Packages (same secret maven-version-bump.yml already uses for this).
+# =============================================================================
+
+name: JDK 25 Maven Baseline Guard
+
+on:
+  workflow_call:
+    inputs:
+      minimum-java-version:
+        description: "Minimum acceptable Java release/source/target/toolchain version."
+        required: false
+        type: string
+        default: '25'
+      workflows-ref:
+        description: "kooker-workflows ref to source scripts/check-jdk25-baseline.sh from."
+        required: false
+        type: string
+        default: main
+    outputs:
+      result:
+        description: "'pass' or 'fail'"
+        value: ${{ jobs.guard.outputs.result }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  guard:
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
+    outputs:
+      result: ${{ steps.verdict.outputs.result }}
+    steps:
+      - name: Checkout calling repository
+        uses: actions/checkout@v4
+
+      - name: Fetch the shared guard script from kooker-workflows
+        uses: actions/checkout@v4
+        with:
+          repository: duikindiesee/kooker-workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .kooker-workflows-guard
+          sparse-checkout: |
+            scripts/check-jdk25-baseline.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Layer 1 — static scan of committed POM/toolchain declarations
+        id: static
+        run: |
+          set +e
+          chmod +x .kooker-workflows-guard/scripts/check-jdk25-baseline.sh
+          .kooker-workflows-guard/scripts/check-jdk25-baseline.sh \
+            --root . \
+            --minimum "${{ inputs.minimum-java-version }}" \
+            --allow-absent
+          code=$?
+          set -e
+          echo "exit-code=${code}" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 1 ]; then
+            echo "::error::JDK ${{ inputs.minimum-java-version }} baseline guard: a committed pom.xml/toolchains.xml declares a Java version below ${{ inputs.minimum-java-version }}, or its declarations conflict. See the [jdk25-guard] findings above."
+          elif [ "$code" -eq 2 ]; then
+            echo "::notice::JDK ${{ inputs.minimum-java-version }} baseline guard: no project file declares its own Java version — checking the effective (parent-inherited) configuration next."
+          fi
+
+      - name: Set up JDK ${{ inputs.minimum-java-version }} for the effective-configuration cross-check
+        if: steps.static.outputs.exit-code == '2'
+        uses: actions/setup-java@v5
+        with:
+          java-version: ${{ inputs.minimum-java-version }}
+          distribution: temurin
+          cache: maven
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+
+      - name: Layer 2 — effective-configuration cross-check (parent-POM inheritance)
+        id: effective
+        if: steps.static.outputs.exit-code == '2'
+        run: |
+          set +e
+          MINIMUM="${{ inputs.minimum-java-version }}"
+          FAIL=0
+
+          # Only re-examine files the static scan found nothing in — a file that
+          # already declared something was already decisively judged by Layer 1.
+          while IFS= read -r pom; do
+            dir="$(dirname "$pom")"
+            val=""
+            for expr in maven.compiler.release maven.compiler.target maven.compiler.source; do
+              raw="$(mvn -q -f "$pom" help:evaluate -Dexpression="$expr" -DforceStdout 2>/dev/null | tail -1)"
+              # help:evaluate echoes "null object or invalid expression" (or
+              # similar) rather than failing when a property is unset — treat
+              # anything non-numeric as unresolved and try the next expression.
+              if [[ "$raw" =~ ^1\.([0-9]+)$ ]]; then
+                raw="${BASH_REMATCH[1]}"
+              fi
+              if [[ "$raw" =~ ^[0-9]+$ ]]; then
+                val="$raw"
+                break
+              fi
+            done
+
+            if [ -z "$val" ]; then
+              echo "::error file=${pom}::JDK ${MINIMUM} baseline guard: ${pom} declares no Java version of its own AND Maven's effective configuration (including any parent POM) resolves to nothing. Fail-closed: an in-scope Maven project must have a resolvable Java baseline."
+              FAIL=1
+              continue
+            fi
+            if [ "$val" -lt "$MINIMUM" ]; then
+              echo "::error file=${pom}::JDK ${MINIMUM} baseline guard: ${pom}'s EFFECTIVE Java version (inherited/interpolated) resolves to ${val}, which is below ${MINIMUM}."
+              FAIL=1
+            else
+              echo "[jdk25-guard] effective  ${pom}  ->  Java ${val}  (>= ${MINIMUM}, OK)"
+            fi
+          done < <(find . \
+            \( -path '*/target/*' -o -path '*/.git/*' -o -path '*/.kooker-workflows-guard/*' -o -path '*/node_modules/*' \) -prune -o \
+            -name 'pom.xml' -type f -print)
+
+          echo "exit-code=${FAIL}" >> "$GITHUB_OUTPUT"
+          set -e
+          exit 0
+
+      - name: Final verdict
+        id: verdict
+        run: |
+          static_code="${{ steps.static.outputs.exit-code }}"
+          effective_code="${{ steps.effective.outputs.exit-code }}"
+          if [ "$static_code" = "1" ] || [ "$effective_code" = "1" ]; then
+            echo "result=fail" >> "$GITHUB_OUTPUT"
+            echo "::error::JDK ${{ inputs.minimum-java-version }} baseline guard FAILED — see findings above. Build/package steps must not run."
+            exit 1
+          fi
+          echo "result=pass" >> "$GITHUB_OUTPUT"
+          echo "[jdk25-guard] PASS — every in-scope Maven project is on Java ${{ inputs.minimum-java-version }} or above."
