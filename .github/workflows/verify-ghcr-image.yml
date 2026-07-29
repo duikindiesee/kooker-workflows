@@ -1,0 +1,109 @@
+# =============================================================================
+# verify-ghcr-image.yml
+# =============================================================================
+# PURPOSE
+#   Reusable "does this exact tag actually exist in GHCR" gate, extracted from
+#   gitops-sync.yml's own proven image-existence check (kooker-workflows #50)
+#   so a build-and-push workflow can call it immediately after pushing —
+#   catching a false-green release (built version != published tag, or the
+#   push silently failed) in the SAME run that built it, instead of only
+#   discovering it later when gitops-sync tries to deploy a tag that was
+#   never published.
+#
+#   This is the deterministic build-version contract's registry-verification
+#   step (see kooker-service-user PR #182), pulled into a shared, independently
+#   testable building block so every fleet consumer can call one proven step
+#   instead of hand-rolling `docker buildx imagetools inspect` per repo.
+#   gitops-sync.yml keeps its own copy of this same check as a second,
+#   independent gate at deploy time — defense in depth, not a replacement.
+#
+# USAGE (in calling workflow, right after the image push step)
+#   jobs:
+#     build-and-push:
+#       # ... build, tag and push the image ...
+#       outputs:
+#         new_version: ${{ steps.maven-version.outputs.version }}
+#
+#     verify-published:
+#       needs: build-and-push
+#       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+#       uses: duikindiesee/kooker-workflows/.github/workflows/verify-ghcr-image.yml@main
+#       with:
+#         image_name: ghcr.io/duikindiesee/kooker-service-user
+#         tag: ${{ needs.build-and-push.outputs.new_version }}
+#       secrets: inherit
+#
+#     deploy:
+#       needs: [build-and-push, verify-published]
+#       uses: duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main
+#       with:
+#         image_name: ghcr.io/duikindiesee/kooker-service-user
+#         new_tag: ${{ needs.build-and-push.outputs.new_version }}
+#         # ...
+#       secrets: inherit
+#
+# REQUIRED SECRETS
+#   MAVEN_PUBLISH_TOKEN — PAT with read access to GHCR for the calling repo's
+#   own packages (the same identity gitops-sync.yml authenticates with).
+# =============================================================================
+
+name: Verify GHCR Image Published
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'The base image name (e.g. ghcr.io/org/repo)'
+        required: true
+        type: string
+      tag:
+        description: 'The exact tag that must exist in the registry'
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+jobs:
+  verify:
+    runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
+    steps:
+      - name: Validate the immutable image reference
+        id: image
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$TAG" ]]; then
+            echo "::error::tag is empty — the caller's build job produced no version to verify."
+            exit 1
+          fi
+          if [[ ! "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_./-]+$ ]]; then
+            echo "::error::image_name must be a lowercase ghcr.io image path"
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::tag is not a valid OCI tag"
+            exit 1
+          fi
+          echo "reference=${IMAGE_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+
+      - name: Set up Buildx for registry inspection
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prove the exact tag exists in the registry
+        shell: bash
+        env:
+          IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_REFERENCE"
+          echo "Verified published image ${IMAGE_REFERENCE}."
