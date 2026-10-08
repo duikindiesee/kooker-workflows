@@ -81,6 +81,50 @@ jobs:
           path: infra
           ref: ${{ inputs.target_branch }}
 
+      - name: Enforce release hold and adoption lock
+        shell: bash
+        env:
+          KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          NEW_TAG: ${{ inputs.new_tag }}
+        run: |
+          set -euo pipefail
+          PROTECTED_CLIENT="manifests/overlays/develop/citylife"
+          PROTECTED_SERVER="manifests/overlays/develop/citylife-server"
+
+          if [ "$KUSTOMIZE_PATH" != "$PROTECTED_CLIENT" ] && [ "$KUSTOMIZE_PATH" != "$PROTECTED_SERVER" ]; then
+            echo "INFO: Unrelated service overlay ($KUSTOMIZE_PATH); adoption lock check bypassed."
+            exit 0
+          fi
+
+          echo "INFO: Evaluating fail-closed release hold for protected overlay: $KUSTOMIZE_PATH"
+
+          if [ "$KUSTOMIZE_PATH" = "$PROTECTED_CLIENT" ] && [ "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife" ]; then
+            echo "::error::Image name mismatch: protected client overlay '$KUSTOMIZE_PATH' requires image 'ghcr.io/duikindiesee/citylife', got '$IMAGE_NAME'."
+            exit 1
+          fi
+
+          if [ "$KUSTOMIZE_PATH" = "$PROTECTED_SERVER" ] && [ "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife-server" ]; then
+            echo "::error::Image name mismatch: protected server overlay '$KUSTOMIZE_PATH' requires image 'ghcr.io/duikindiesee/citylife-server', got '$IMAGE_NAME'."
+            exit 1
+          fi
+
+          LOCK_FILE="infra/manifests/adoption-locks/citylife-multiplayer.lock"
+          if [ ! -f "$LOCK_FILE" ]; then
+            echo "::error::Missing adoption lock file at '$LOCK_FILE'. Protected overlay fails closed; single-service automated adoption is blocked."
+            exit 1
+          fi
+
+          if command -v jq >/dev/null 2>&1; then
+            if ! jq -e . "$LOCK_FILE" >/dev/null 2>&1; then
+              echo "::error::Malformed or unreadable adoption lock file at '$LOCK_FILE'. Fails closed."
+              exit 1
+            fi
+          fi
+
+          echo "::error::Release hold active: Single-service automated adoption is strictly blocked for $KUSTOMIZE_PATH ($IMAGE_NAME:$NEW_TAG). Paired adoption requires a separately reviewed single infra PR updating both immutable image pins simultaneously."
+          exit 1
+
       - name: Install Kustomize
         uses: imranismail/setup-kustomize@v2
 
@@ -123,7 +167,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITOPS_APPROVER_TOKEN }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
+          KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
         run: |
+          set -euo pipefail
+          if [ "$KUSTOMIZE_PATH" = "manifests/overlays/develop/citylife" ] || [ "$KUSTOMIZE_PATH" = "manifests/overlays/develop/citylife-server" ]; then
+            echo "::error::Auto-approval and auto-merge is strictly forbidden for protected CityLife overlays: $KUSTOMIZE_PATH"
+            exit 1
+          fi
           if [ -z "$GH_TOKEN" ]; then
             echo "::error::GITOPS_APPROVER_TOKEN is not set. Deploy PR opened but NOT merged: $PR_URL"
             exit 1

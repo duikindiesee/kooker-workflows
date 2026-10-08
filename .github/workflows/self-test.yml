@@ -30,3 +30,6 @@ jobs:
 
       - name: JDK 25 baseline guard — fixture test suite
         run: bash tests/check-jdk25-baseline.test.sh
+
+      - name: Adoption lock guard and GitOps workflow regression suite
+        run: bash tests/check-adoption-lock.test.sh
