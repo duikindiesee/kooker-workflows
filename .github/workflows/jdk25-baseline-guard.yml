@@ -99,7 +99,7 @@ jobs:
 
       - name: Set up JDK ${{ inputs.minimum-java-version }} for the effective-configuration cross-check
         if: steps.static.outputs.exit-code == '2'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           java-version: ${{ inputs.minimum-java-version }}
           distribution: temurin
