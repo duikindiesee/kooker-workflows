@@ -4,9 +4,13 @@
 #
 # Validates:
 # 1. Step order and barrier placement in .github/workflows/gitops-sync.yml
-# 2. Execution of the actual workflow run block for the adoption lock guard
-# 3. Execution of the actual workflow run block for the approval/merge barrier
-# 4. Standalone CLI behavior of scripts/check-adoption-lock.sh
+# 2. Execution of actual workflow run block for the adoption lock guard,
+#    including canonical path resolution, equivalent spellings (./, .., trailing slash),
+#    escaping paths, missing paths, and unrelated services.
+# 3. Execution of actual workflow run block for the approval/merge barrier across
+#    all equivalent spellings.
+# 4. Standalone CLI behavior of scripts/check-adoption-lock.sh across all equivalent
+#    spellings and invalid paths.
 #
 # Zero external dependencies beyond bash + node/python. Run directly:
 #   bash tests/check-adoption-lock.test.sh
@@ -23,7 +27,13 @@ GUARD_SCRIPT="$REPO_ROOT/scripts/check-adoption-lock.sh"
 TMPDIR_ROOT="$(mktemp -d 2>/dev/null || mktemp -d -t 'adoption-lock-test')"
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
 
+# Create mock infra repo structure with overlays
 mkdir -p "$TMPDIR_ROOT/infra/manifests/adoption-locks"
+mkdir -p "$TMPDIR_ROOT/infra/manifests/overlays/develop/citylife"
+mkdir -p "$TMPDIR_ROOT/infra/manifests/overlays/develop/citylife-server"
+mkdir -p "$TMPDIR_ROOT/infra/manifests/overlays/develop/kooker-web"
+mkdir -p "$TMPDIR_ROOT/infra/manifests/overlays/develop/sportifine-web"
+
 VALID_LOCK="$TMPDIR_ROOT/infra/manifests/adoption-locks/citylife-multiplayer.lock"
 cat << 'EOF' > "$VALID_LOCK"
 {
@@ -93,7 +103,6 @@ assert_contains() {
 
 echo "=== 1. Validating gitops-sync.yml step order and structure ==="
 
-# Check that Enforce step appears after Checkout kooker-infra and before Kustomize/PR/merge steps
 checkout_line=$(grep -n "name: Checkout kooker-infra" "$WORKFLOW_FILE" | cut -d: -f1)
 guard_line=$(grep -n "name: Enforce release hold and adoption lock" "$WORKFLOW_FILE" | cut -d: -f1)
 kustomize_line=$(grep -n "name: Update Kustomize Image" "$WORKFLOW_FILE" | cut -d: -f1)
@@ -116,7 +125,6 @@ else
   FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
-# Validate extracted workflow scripts are non-empty
 if [ -s "$WORKFLOW_GUARD_SCRIPT" ]; then
   echo "PASS  extracted workflow guard run block is non-empty"
   PASS_COUNT=$((PASS_COUNT + 1))
@@ -154,83 +162,199 @@ run_workflow_guard() {
 EMPTY_DIR="$TMPDIR_ROOT/empty_test_dir"
 mkdir -p "$EMPTY_DIR"
 
-assert_exit "workflow guard: unrelated overlay (kooker-web) exits 0" 0 \
+# 2a. Unrelated overlays proceed unhindered (literal, ./, trailing slash, ..)
+assert_exit "guard: unrelated overlay (kooker-web) exits 0" 0 \
   run_workflow_guard "manifests/overlays/develop/kooker-web" "ghcr.io/duikindiesee/kooker-web" "0.125.0" "$TMPDIR_ROOT"
 
-assert_contains "workflow guard: unrelated overlay logs bypass" "adoption lock check bypassed" \
-  run_workflow_guard "manifests/overlays/develop/kooker-web" "ghcr.io/duikindiesee/kooker-web" "0.125.0" "$TMPDIR_ROOT"
+assert_exit "guard: unrelated overlay with ./ exits 0" 0 \
+  run_workflow_guard "./manifests/overlays/develop/kooker-web" "ghcr.io/duikindiesee/kooker-web" "0.125.0" "$TMPDIR_ROOT"
 
-assert_exit "workflow guard: client missing lock file fails closed (exit 1)" 1 \
+assert_exit "guard: unrelated overlay with trailing slash exits 0" 0 \
+  run_workflow_guard "manifests/overlays/develop/kooker-web/" "ghcr.io/duikindiesee/kooker-web" "0.125.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: unrelated overlay with .. exits 0" 0 \
+  run_workflow_guard "manifests/overlays/develop/../develop/kooker-web" "ghcr.io/duikindiesee/kooker-web" "0.125.0" "$TMPDIR_ROOT"
+
+# 2b. Unavailable infra directory fails closed
+assert_exit "guard: unavailable infra dir fails closed (exit 1)" 1 \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$EMPTY_DIR"
 
-assert_contains "workflow guard: client missing lock error" "Missing adoption lock file" \
+assert_contains "guard: unavailable infra dir error message" "Infra directory 'infra' is not available" \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$EMPTY_DIR"
 
-assert_exit "workflow guard: server missing lock file fails closed (exit 1)" 1 \
-  run_workflow_guard "manifests/overlays/develop/citylife-server" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$EMPTY_DIR"
+# 2c. Escaping and invalid paths fail closed
+assert_exit "guard: escaping path ../../.. fails closed (exit 1)" 1 \
+  run_workflow_guard "../../.." "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
 
-assert_exit "workflow guard: client image mismatch fails closed (exit 1)" 1 \
+assert_contains "guard: escaping path error message" "escapes infra root" \
+  run_workflow_guard "../../.." "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: absolute path fails closed (exit 1)" 1 \
+  run_workflow_guard "/manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_contains "guard: absolute path error message" "Invalid or absolute kustomize_path" \
+  run_workflow_guard "/manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: nonexistent target directory fails closed (exit 1)" 1 \
+  run_workflow_guard "manifests/overlays/develop/nonexistent" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_contains "guard: nonexistent target error message" "does not exist in infra" \
+  run_workflow_guard "manifests/overlays/develop/nonexistent" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+# 2d. Missing lock file fails closed
+NO_LOCK_DIR="$TMPDIR_ROOT/no_lock_infra"
+mkdir -p "$NO_LOCK_DIR/infra/manifests/overlays/develop/citylife"
+assert_exit "guard: protected client missing lock file fails closed (exit 1)" 1 \
+  run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$NO_LOCK_DIR"
+
+assert_contains "guard: missing lock file error message" "Missing adoption lock file" \
+  run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$NO_LOCK_DIR"
+
+# 2e. Image name mismatch fails closed
+assert_exit "guard: client overlay with server image exits 1" 1 \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife-server" "0.61.0" "$TMPDIR_ROOT"
 
-assert_contains "workflow guard: client image mismatch message" "Image name mismatch" \
+assert_contains "guard: client image mismatch message" "Image name mismatch" \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife-server" "0.61.0" "$TMPDIR_ROOT"
 
-assert_exit "workflow guard: server image mismatch fails closed (exit 1)" 1 \
+assert_exit "guard: server overlay with client image exits 1" 1 \
   run_workflow_guard "manifests/overlays/develop/citylife-server" "ghcr.io/duikindiesee/citylife" "0.4.0" "$TMPDIR_ROOT"
 
-assert_exit "workflow guard: single-service client adoption fails closed (exit 1)" 1 \
+# 2f. Equivalent path spellings for protected client fail closed
+assert_exit "guard: literal client overlay path exits 1" 1 \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
 
-assert_contains "workflow guard: client single-service blocked message" "Single-service automated adoption is strictly blocked" \
+assert_contains "guard: literal client blocked message" "Single-service automated adoption is strictly blocked" \
   run_workflow_guard "manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
 
-assert_exit "workflow guard: single-service server adoption fails closed (exit 1)" 1 \
+assert_exit "guard: client with leading ./ exits 1" 1 \
+  run_workflow_guard "./manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_contains "guard: client with ./ blocked message" "Single-service automated adoption is strictly blocked for manifests/overlays/develop/citylife" \
+  run_workflow_guard "./manifests/overlays/develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: client with trailing slash exits 1" 1 \
+  run_workflow_guard "manifests/overlays/develop/citylife/" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_contains "guard: client with trailing slash blocked message" "Single-service automated adoption is strictly blocked for manifests/overlays/develop/citylife" \
+  run_workflow_guard "manifests/overlays/develop/citylife/" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: client with .. navigation exits 1" 1 \
+  run_workflow_guard "manifests/overlays/develop/../develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+assert_contains "guard: client with .. blocked message" "Single-service automated adoption is strictly blocked for manifests/overlays/develop/citylife" \
+  run_workflow_guard "manifests/overlays/develop/../develop/citylife" "ghcr.io/duikindiesee/citylife" "0.61.0" "$TMPDIR_ROOT"
+
+# 2g. Equivalent path spellings for protected server fail closed
+assert_exit "guard: literal server overlay path exits 1" 1 \
   run_workflow_guard "manifests/overlays/develop/citylife-server" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$TMPDIR_ROOT"
 
-assert_contains "workflow guard: server single-service blocked message" "Single-service automated adoption is strictly blocked" \
-  run_workflow_guard "manifests/overlays/develop/citylife-server" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$TMPDIR_ROOT"
+assert_exit "guard: server with leading ./ exits 1" 1 \
+  run_workflow_guard "./manifests/overlays/develop/citylife-server" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: server with trailing slash exits 1" 1 \
+  run_workflow_guard "manifests/overlays/develop/citylife-server/" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$TMPDIR_ROOT"
+
+assert_exit "guard: server with .. navigation exits 1" 1 \
+  run_workflow_guard "manifests/overlays/develop/../develop/citylife-server" "ghcr.io/duikindiesee/citylife-server" "0.4.0" "$TMPDIR_ROOT"
 
 echo ""
 echo "=== 3. Testing actual gitops-sync.yml approve/merge barrier ==="
 
 run_workflow_merge() {
   local kustomize_path="$1"
-  KUSTOMIZE_PATH="$kustomize_path" \
-  GH_TOKEN="mock_token" \
-  PR_URL="https://github.com/duikindiesee/kooker-infra/pull/999" \
-  bash "$WORKFLOW_MERGE_SCRIPT"
+  local work_dir="$2"
+  (
+    cd "$work_dir"
+    KUSTOMIZE_PATH="$kustomize_path" \
+    GH_TOKEN="mock_token" \
+    PR_URL="https://github.com/duikindiesee/kooker-infra/pull/999" \
+    bash "$WORKFLOW_MERGE_SCRIPT"
+  )
 }
 
-assert_exit "workflow merge barrier: client overlay exits 1" 1 \
-  run_workflow_merge "manifests/overlays/develop/citylife"
+assert_exit "barrier: literal client overlay exits 1" 1 \
+  run_workflow_merge "manifests/overlays/develop/citylife" "$TMPDIR_ROOT"
 
-assert_contains "workflow merge barrier: client error message" "Auto-approval and auto-merge is strictly forbidden" \
-  run_workflow_merge "manifests/overlays/develop/citylife"
+assert_contains "barrier: literal client error message" "Auto-approval and auto-merge is strictly forbidden" \
+  run_workflow_merge "manifests/overlays/develop/citylife" "$TMPDIR_ROOT"
 
-assert_exit "workflow merge barrier: server overlay exits 1" 1 \
-  run_workflow_merge "manifests/overlays/develop/citylife-server"
+assert_exit "barrier: client with leading ./ exits 1" 1 \
+  run_workflow_merge "./manifests/overlays/develop/citylife" "$TMPDIR_ROOT"
 
-assert_contains "workflow merge barrier: server error message" "Auto-approval and auto-merge is strictly forbidden" \
-  run_workflow_merge "manifests/overlays/develop/citylife-server"
+assert_contains "barrier: client with ./ error message" "Auto-approval and auto-merge is strictly forbidden for protected CityLife overlays: manifests/overlays/develop/citylife" \
+  run_workflow_merge "./manifests/overlays/develop/citylife" "$TMPDIR_ROOT"
+
+assert_exit "barrier: client with trailing slash exits 1" 1 \
+  run_workflow_merge "manifests/overlays/develop/citylife/" "$TMPDIR_ROOT"
+
+assert_exit "barrier: client with .. navigation exits 1" 1 \
+  run_workflow_merge "manifests/overlays/develop/../develop/citylife" "$TMPDIR_ROOT"
+
+assert_exit "barrier: server with leading ./ exits 1" 1 \
+  run_workflow_merge "./manifests/overlays/develop/citylife-server" "$TMPDIR_ROOT"
+
+assert_exit "barrier: server with trailing slash exits 1" 1 \
+  run_workflow_merge "manifests/overlays/develop/citylife-server/" "$TMPDIR_ROOT"
+
+assert_exit "barrier: escaping path fails closed (exit 1)" 1 \
+  run_workflow_merge "../../.." "$TMPDIR_ROOT"
+
+assert_contains "barrier: escaping path error message" "escapes infra root" \
+  run_workflow_merge "../../.." "$TMPDIR_ROOT"
 
 echo ""
 echo "=== 4. Testing standalone scripts/check-adoption-lock.sh ==="
 
 run_guard_script() {
-  bash "$GUARD_SCRIPT" "$@"
+  (
+    cd "$TMPDIR_ROOT"
+    bash "$GUARD_SCRIPT" "$@"
+  )
 }
 
+# 4a. Standalone CLI: unrelated overlays
 assert_exit "script: unrelated overlay exits 0" 0 \
-  run_guard_script --kustomize-path "manifests/overlays/develop/kooker-web" --image-name "ghcr.io/duikindiesee/kooker-web" --new-tag "0.125.0"
+  run_guard_script --infra-dir "infra" --kustomize-path "manifests/overlays/develop/kooker-web" --image-name "ghcr.io/duikindiesee/kooker-web" --new-tag "0.125.0"
 
-assert_exit "script: protected client missing lock exits 1" 1 \
-  run_guard_script --kustomize-path "manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0" --lock-path "$TMPDIR_ROOT/nonexistent.lock"
+assert_exit "script: unrelated overlay with ./ exits 0" 0 \
+  run_guard_script --infra-dir "infra" --kustomize-path "./manifests/overlays/develop/kooker-web" --image-name "ghcr.io/duikindiesee/kooker-web" --new-tag "0.125.0"
 
-assert_exit "script: protected client malformed lock exits 1" 1 \
-  run_guard_script --kustomize-path "manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0" --lock-path "$MALFORMED_LOCK"
+# 4b. Standalone CLI: unavailable infra dir fails closed (MoJoJo finding reproduction)
+assert_exit "script: unavailable infra dir fails closed (exit 1)" 1 \
+  run_guard_script --infra-dir "/not/available" --kustomize-path "./manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
 
-assert_exit "script: protected client locked exits 1" 1 \
-  run_guard_script --kustomize-path "manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0" --lock-path "$VALID_LOCK"
+assert_contains "script: unavailable infra dir error message" "is not available" \
+  run_guard_script --infra-dir "/not/available" --kustomize-path "./manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+# 4c. Standalone CLI: equivalent path spellings fail closed
+assert_exit "script: client with ./ exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "./manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_contains "script: client with ./ blocked message" "Single-service automatic adoption is blocked for CityLife multiplayer (manifests/overlays/develop/citylife)" \
+  run_guard_script --infra-dir "infra" --kustomize-path "./manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_exit "script: client with trailing slash exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "manifests/overlays/develop/citylife/" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_exit "script: client with .. exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "manifests/overlays/develop/../develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_exit "script: server with ./ exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "./manifests/overlays/develop/citylife-server" --image-name "ghcr.io/duikindiesee/citylife-server" --new-tag "0.4.0"
+
+assert_exit "script: server with trailing slash exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "manifests/overlays/develop/citylife-server/" --image-name "ghcr.io/duikindiesee/citylife-server" --new-tag "0.4.0"
+
+# 4d. Standalone CLI: escaping and invalid paths fail closed
+assert_exit "script: escaping path exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "../../.." --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_contains "script: escaping path error message" "escapes infra root" \
+  run_guard_script --infra-dir "infra" --kustomize-path "../../.." --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
+
+assert_exit "script: nonexistent target exits 1" 1 \
+  run_guard_script --infra-dir "infra" --kustomize-path "manifests/overlays/develop/nonexistent" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
 
 echo ""
 echo "=== Summary: $PASS_COUNT passed, $FAIL_COUNT failed ==="

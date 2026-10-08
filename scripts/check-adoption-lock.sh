@@ -78,25 +78,54 @@ if [[ -z "$KUSTOMIZE_PATH" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$INFRA_DIR" ]]; then
+  echo "ERROR: Infra directory '$INFRA_DIR' is not available. Fails closed." >&2
+  exit 1
+fi
+
+INFRA_ROOT="$(cd "$INFRA_DIR" && pwd -P)"
+
+if [[ "$KUSTOMIZE_PATH" == /* || "$KUSTOMIZE_PATH" == ~* ]]; then
+  echo "ERROR: Invalid or absolute kustomize_path '$KUSTOMIZE_PATH'. Fails closed." >&2
+  exit 1
+fi
+
+if [[ ! -d "$INFRA_ROOT/$KUSTOMIZE_PATH" ]]; then
+  echo "ERROR: Target kustomize path does not exist in infra: '$KUSTOMIZE_PATH'. Fails closed." >&2
+  exit 1
+fi
+
+TARGET_CANONICAL="$(cd "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
+
+case "$TARGET_CANONICAL" in
+  "$INFRA_ROOT"/*)
+    CANONICAL_PATH="${TARGET_CANONICAL#"$INFRA_ROOT"/}"
+    ;;
+  *)
+    echo "ERROR: Kustomize path escapes infra root: '$KUSTOMIZE_PATH'. Fails closed." >&2
+    exit 1
+    ;;
+esac
+
 PROTECTED_CLIENT="manifests/overlays/develop/citylife"
 PROTECTED_SERVER="manifests/overlays/develop/citylife-server"
 
 # Unrelated services proceed unhindered
-if [[ "$KUSTOMIZE_PATH" != "$PROTECTED_CLIENT" && "$KUSTOMIZE_PATH" != "$PROTECTED_SERVER" ]]; then
-  echo "INFO: Unrelated service overlay ($KUSTOMIZE_PATH); adoption lock check bypassed."
+if [[ "$CANONICAL_PATH" != "$PROTECTED_CLIENT" && "$CANONICAL_PATH" != "$PROTECTED_SERVER" ]]; then
+  echo "INFO: Unrelated service overlay ($CANONICAL_PATH); adoption lock check bypassed."
   exit 0
 fi
 
 # Protected overlay validation
-echo "INFO: Evaluating fail-closed release hold for protected overlay: $KUSTOMIZE_PATH"
+echo "INFO: Evaluating fail-closed release hold for protected overlay: $CANONICAL_PATH (input: $KUSTOMIZE_PATH)"
 
-if [[ "$KUSTOMIZE_PATH" == "$PROTECTED_CLIENT" && "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife" ]]; then
-  echo "ERROR: Mismatched image_name '$IMAGE_NAME' for protected client overlay '$KUSTOMIZE_PATH'" >&2
+if [[ "$CANONICAL_PATH" == "$PROTECTED_CLIENT" && "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife" ]]; then
+  echo "ERROR: Mismatched image_name '$IMAGE_NAME' for protected client overlay '$CANONICAL_PATH'" >&2
   exit 1
 fi
 
-if [[ "$KUSTOMIZE_PATH" == "$PROTECTED_SERVER" && "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife-server" ]]; then
-  echo "ERROR: Mismatched image_name '$IMAGE_NAME' for protected server overlay '$KUSTOMIZE_PATH'" >&2
+if [[ "$CANONICAL_PATH" == "$PROTECTED_SERVER" && "$IMAGE_NAME" != "ghcr.io/duikindiesee/citylife-server" ]]; then
+  echo "ERROR: Mismatched image_name '$IMAGE_NAME' for protected server overlay '$CANONICAL_PATH'" >&2
   exit 1
 fi
 
@@ -135,5 +164,5 @@ if [[ "$is_valid_json" -ne 1 ]]; then
 fi
 
 # Automatic single-service adoption is blocked for protected overlays
-echo "ERROR: Single-service automatic adoption is blocked for CityLife multiplayer ($KUSTOMIZE_PATH). Paired promotion must be performed via a separately reviewed single infra PR updating both immutable image pins simultaneously." >&2
+echo "ERROR: Single-service automatic adoption is blocked for CityLife multiplayer ($CANONICAL_PATH). Paired promotion must be performed via a separately reviewed single infra PR updating both immutable image pins simultaneously." >&2
 exit 1
