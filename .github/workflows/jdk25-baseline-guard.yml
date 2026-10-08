@@ -67,10 +67,10 @@ jobs:
       result: ${{ steps.verdict.outputs.result }}
     steps:
       - name: Checkout calling repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Fetch the shared guard script from kooker-workflows
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: duikindiesee/kooker-workflows
           ref: ${{ inputs.workflows-ref }}
