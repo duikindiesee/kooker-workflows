@@ -170,22 +170,30 @@ jobs:
           npm version "${NEW_VERSION}" --no-git-tag-version --allow-same-version
 
           # ──────────────────────────────────────────────────────────────────
-          # PRETTIER FORMATTING (Format-on-Merge Strategy)
-          # ──────────────────────────────────────────────────────────────────
-          echo "Auto-formatting tracked source files using Prettier..."
-          FORMAT_TARGETS="$(git ls-files '*.js' '*.jsx' '*.ts' '*.tsx' '*.mjs' '*.cjs' '*.json' '*.yml' '*.yaml' '*.md' '*.css' '*.scss' 2>/dev/null || true)"
-          if [ -n "${FORMAT_TARGETS}" ]; then
-            npm exec --yes --package prettier@3.3.3 prettier -- --write ${FORMAT_TARGETS} --ignore-path .gitignore
-          else
-            echo "No tracked files matched Prettier patterns; skipping formatting."
+          # A release bump must not rewrite reviewed source or immutable fixtures.
+          # npm version updates package metadata; any other tracked/untracked
+          # path means this bump is unsafe to publish, even if a hook made it.
+          if ! git diff --quiet HEAD -- . ':(exclude)package.json' ':(exclude)package-lock.json' ||
+             [ -n "$(git ls-files --others --exclude-standard)" ]; then
+            echo "::error::Version bump changed a non-package path; refusing the release commit."
+            exit 1
+          fi
+          if git diff --quiet HEAD -- package.json; then
+            echo "::error::npm version did not change package.json; refusing the release commit."
+            exit 1
           fi
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json 2>/dev/null || git add package.json
-          # Also stage any modified tracked files (including those formatted by Prettier)
-          git add -u
-          git commit -m "chore(release): bump to ${NEW_VERSION} and format code"
+          git add -- package.json
+          if git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
+            if [ ! -f package-lock.json ]; then
+              echo "::error::Tracked package-lock.json is missing; refusing the release commit."
+              exit 1
+            fi
+            git add -- package-lock.json
+          fi
+          git commit -m "chore(release): bump to ${NEW_VERSION}"
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
