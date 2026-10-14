@@ -107,6 +107,65 @@ if run_step "$UNTRACKED" 'fix: reviewed source merge' || [ "$(cd "$UNTRACKED" &&
 fi
 printf 'PASS untracked-worktree: unexpected untracked file fails closed\n'
 
+HOOKED="$TMP/precommit-source-staging"
+setup_case "$HOOKED" synthetic
+printf 'module.exports = 1;\n' > "$HOOKED/source.js"
+(cd "$HOOKED" && git add -- source.js && git -c user.name=Fixture -c user.email=fixture@local commit -qm 'tracked source fixture')
+cat > "$HOOKED/.git/hooks/pre-commit" <<'SH'
+#!/bin/sh
+printf 'module.exports = 2;\n' > source.js
+git add -- source.js
+printf 'hook executed\n' > "$HOOK_MARKER"
+SH
+chmod +x "$HOOKED/.git/hooks/pre-commit"
+export HOOK_MARKER="$TMP/precommit-ran.txt"
+base_head="$(cd "$HOOKED" && git rev-parse HEAD)"
+if run_step "$HOOKED" 'fix: reviewed source merge'; then
+  printf 'FAIL precommit-source-staging: hook-expanded commit reached bump success\n' >&2
+  exit 1
+fi
+if [ ! -f "$HOOK_MARKER" ] ||
+   [ "$(cd "$HOOKED" && git rev-parse HEAD)" != "$base_head" ] ||
+   (cd "$HOOKED" && git diff --quiet HEAD -- source.js) ||
+   grep -q '^bumped=true$' "$TMP/precommit-source-staging-output.txt" 2>/dev/null; then
+  printf 'FAIL precommit-source-staging: hook not exercised, HEAD not restored or success emitted\n' >&2
+  exit 1
+fi
+printf 'PASS precommit-source-staging: hook ran; exact pre-bump HEAD restored, no success output\n'
+
+POST="$TMP/postcommit-untracked"
+setup_case "$POST" synthetic
+cat > "$POST/.git/hooks/post-commit" <<'SH'
+#!/bin/sh
+printf 'unexpected post-commit file\n' > unexpected.txt
+printf 'hook executed\n' > "$POST_MARKER"
+SH
+chmod +x "$POST/.git/hooks/post-commit"
+export POST_MARKER="$TMP/postcommit-ran.txt"
+base_head="$(cd "$POST" && git rev-parse HEAD)"
+if run_step "$POST" 'fix: reviewed source merge' ||
+   [ ! -f "$POST_MARKER" ] ||
+   [ "$(cd "$POST" && git rev-parse HEAD)" != "$base_head" ] ||
+   grep -q '^bumped=true$' "$TMP/postcommit-untracked-output.txt" 2>/dev/null; then
+  printf 'FAIL postcommit-untracked: dirty tree reached publication or HEAD not restored\n' >&2
+  exit 1
+fi
+printf 'PASS postcommit-untracked: hook ran; dirty tree refuses publication and restores HEAD\n'
+
+NESTED="$TMP/nested-package"
+setup_case "$NESTED" synthetic
+mkdir -p "$NESTED/nested"
+printf '{"name":"nested","version":"0.1.0"}\n' > "$NESTED/nested/package.json"
+(cd "$NESTED" && git add -- nested/package.json && git -c user.name=Fixture -c user.email=fixture@local commit -qm 'tracked nested package')
+printf 'unexpected nested edit\n' >> "$NESTED/nested/package.json"
+base_head="$(cd "$NESTED" && git rev-parse HEAD)"
+if run_step "$NESTED" 'fix: reviewed source merge' ||
+   [ "$(cd "$NESTED" && git rev-parse HEAD)" != "$base_head" ]; then
+  printf 'FAIL nested-package: root allowlist exempted a nested path\n' >&2
+  exit 1
+fi
+printf 'PASS nested-package: nested package.json is not root metadata\n'
+
 RELEASE="$TMP/release-loop"
 setup_case "$RELEASE" synthetic
 base_head="$(cd "$RELEASE" && git rev-parse HEAD)"

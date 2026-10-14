@@ -185,6 +185,7 @@ jobs:
 
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          PACKAGE_PATHS=(package.json)
           git add -- package.json
           if git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
             if [ ! -f package-lock.json ]; then
@@ -192,8 +193,42 @@ jobs:
               exit 1
             fi
             git add -- package-lock.json
+            PACKAGE_PATHS+=(package-lock.json)
           fi
-          git commit -m "chore(release): bump to ${NEW_VERSION}"
+          # Keep the commit pathspec narrow even if a pre-commit hook stages
+          # another tracked path after the earlier workspace check. Git hooks
+          # can still add to Git's temporary index, so verify the result below.
+          PRE_BUMP_HEAD="$(git rev-parse HEAD)"
+          git commit --only -m "chore(release): bump to ${NEW_VERSION}" -- "${PACKAGE_PATHS[@]}"
+
+          # Verify the actual commit and post-hook worktree BEFORE reporting
+          # success to create-pull-request / auto-merge / release steps. If a
+          # hook expanded the commit, restore only this disposable job's HEAD;
+          # leave the changed index/worktree for diagnosis, never publish it.
+          abort_bump_commit() {
+            git reset --soft "$PRE_BUMP_HEAD"
+            exit 1
+          }
+          if [ "$(git rev-parse HEAD^)" != "$PRE_BUMP_HEAD" ]; then
+            echo "::error::Release commit parent changed unexpectedly; refusing publication."
+            exit 1
+          fi
+          COMMITTED_PATHS="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+          if [ -z "$COMMITTED_PATHS" ]; then
+            echo "::error::Release commit contains no changed paths."
+            abort_bump_commit
+          fi
+          while IFS= read -r path; do
+            case "$path" in
+              package.json|package-lock.json) ;;
+              *) echo "::error::Release commit contains a non-package path; refusing publication."; abort_bump_commit ;;
+            esac
+          done <<< "$COMMITTED_PATHS"
+          if ! printf '%s\n' "$COMMITTED_PATHS" | grep -qx 'package.json' ||
+             [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then
+            echo "::error::Release commit lacks package.json or hooks left an unclean worktree; refusing publication."
+            abort_bump_commit
+          fi
 
           echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
           echo "bumped=true" >> $GITHUB_OUTPUT
