@@ -41,3 +41,6 @@ jobs:
 
       - name: Node version-bump package-only regression suite
         run: bash tests/check-node-version-bump.test.sh
+
+      - name: Node bump merge-trigger identity and mocked shell controls
+        run: node tests/check-node-merge-trigger.cjs
