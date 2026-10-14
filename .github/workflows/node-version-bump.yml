@@ -277,7 +277,9 @@ jobs:
             fi
           }
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Reuse the existing PR-author token so merged pushes can trigger CI.
+          # Separate approval and branch protection remain unchanged.
+          GH_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
 
       # ──────────────────────────────────────────────────────────────────────
       # APPROVE the bump PR with a SEPARATE identity so the armed auto-merge can
