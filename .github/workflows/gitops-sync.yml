@@ -156,7 +156,7 @@ jobs:
           exit 1
 
       - name: Install Kustomize
-        uses: imranismail/setup-kustomize@v2
+        uses: imranismail/setup-kustomize@v3
 
       - name: Update Kustomize Image
         run: |
