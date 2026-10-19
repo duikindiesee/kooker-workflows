@@ -50,3 +50,7 @@ jobs:
 
       - name: Node bump release creation opt-out contract and expression controls
         run: node tests/check-node-release-optout.cjs
+
+      - name: GHCR centralized retention tag-protection regression suite
+        run: node tests/check-ghcr-retention.test.cjs
+
