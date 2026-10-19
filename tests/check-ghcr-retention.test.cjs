@@ -18,10 +18,59 @@ assert.ok(workflowText.includes('default: "^v?[0-9]+\\\\.[0-9]+\\\\.[0-9]+$"'), 
 assert.match(workflowText, /runs-on:\s*\[self-hosted, Linux, X64, kooker1-org, docker\]/);
 assert.match(workflowText, /packages:\s*write/);
 
-// Verify shell declaration on the step
-assert.match(workflowText, /shell:\s*node\s*\{0\}/, 'step must explicitly declare shell: node {0}');
+// Shared runtime contract assertion binding official actions/setup-node@v6 and exact scalar 24 to SAME setup step before actual prune consumer
+function assertRuntimeContract(content) {
+  const setupMarker = '- name: Set up Node.js\n';
+  const setupStart = content.indexOf(setupMarker);
+  assert(setupStart >= 0, 'Step "Set up Node.js" must exist');
 
-console.log('PASS workflow metadata, interface, runner, permissions, and shell: node {0} contract');
+  const restAfterSetup = content.slice(setupStart);
+  const nextStepRel = restAfterSetup.slice(setupMarker.length).search(/\n\s{6}-\s+name:/);
+  const setupStepBlock = nextStepRel >= 0 ? restAfterSetup.slice(0, setupMarker.length + nextStepRel) : restAfterSetup;
+
+  assert.match(setupStepBlock, /uses:\s*actions\/setup-node@v6/, 'Setup step must use official actions/setup-node@v6');
+  assert.match(setupStepBlock, /node-version:\s*24(?:\s|$)/, 'Setup step must explicitly specify scalar node-version 24');
+
+  const pruneMarker = '- name: Prune old image tags\n';
+  const pruneStart = content.indexOf(pruneMarker);
+  assert(pruneStart >= 0, 'Step "Prune old image tags" must exist');
+
+  assert(setupStart < pruneStart, 'Setup step must precede Prune old image tags step');
+
+  const pruneStepRest = content.slice(pruneStart);
+  const nextPruneRel = pruneStepRest.slice(pruneMarker.length).search(/\n\s{6}-\s+name:/);
+  const pruneStepBlock = nextPruneRel >= 0 ? pruneStepRest.slice(0, pruneMarker.length + nextPruneRel) : pruneStepRest;
+  assert.match(pruneStepBlock, /shell:\s*node\s*\{0\}/, 'Prune step must declare shell: node {0}');
+}
+
+// 1. Positive validation on actual workflow content
+assertRuntimeContract(workflowText);
+
+// 2. Genuine negative controls mutating actual full workflow content:
+{
+  // Negative A: Remove setup step completely
+  const noSetup = workflowText.replace(/- name: Set up Node\.js[\s\S]*?(?=- name: Prune old image tags)/, '');
+  assert.throws(() => assertRuntimeContract(noSetup), /Step "Set up Node.js" must exist/, 'negative A: missing setup step must fail');
+
+  // Negative B: Change SAME setup step 24 -> 18
+  const wrongVersion = workflowText.replace(/node-version:\s*24/, 'node-version: 18');
+  assert.throws(() => assertRuntimeContract(wrongVersion), /node-version 24/, 'negative B: wrong version in setup step must fail');
+
+  // Negative C: Relocate actual complete setup step AFTER actual prune consumer
+  const setupMatch = workflowText.match(/- name: Set up Node\.js[\s\S]*?(?=- name: Prune old image tags)/);
+  assert(setupMatch, 'setup step block must be found for relocation test');
+  const setupChunk = setupMatch[0];
+  const withoutSetup = workflowText.replace(setupChunk, '');
+  const relocatedAfterPrune = withoutSetup + '\n' + setupChunk;
+  assert.throws(() => assertRuntimeContract(relocatedAfterPrune), /Setup step must precede/, 'negative C: setup step placed after prune consumer must fail');
+
+  // Negative D: Wrong setup 18 with unrelated 24 elsewhere in workflow
+  const wrongSetupUnrelated24 = workflowText.replace(/node-version:\s*24/, 'node-version: 18')
+    .replace('prune-ghcr:', 'prune-ghcr:\n    # unrelated comment with 24\n    # timeout-minutes: 24');
+  assert.throws(() => assertRuntimeContract(wrongSetupUnrelated24), /node-version 24/, 'negative D: wrong setup 18 + unrelated 24 must fail');
+}
+
+console.log('PASS workflow metadata, interface, runner, permissions, setup-node v6 (Node 24) order, and shell: node {0} contract');
 
 // 2. Extract step execution logic
 function extractStep(workflowContent) {
