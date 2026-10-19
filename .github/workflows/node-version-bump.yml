@@ -52,6 +52,12 @@ name: Node Version Bump (Conventional Commits)
 
 on:
   workflow_call:
+    inputs:
+      create-release:
+        description: "Whether to create a GitHub Release immediately when a version bump PR is created. Defaults to true for backwards compatibility; downstream callers managing publication separately may pass false to opt out."
+        required: false
+        type: boolean
+        default: true
     outputs:
       new-version:
         description: "The package.json version after the bump (or unchanged if skipped)"
@@ -305,7 +311,7 @@ jobs:
             --body "Automated version bump. Approved by the separate approver identity so the armed auto-merge can complete under branch protection."
 
       - name: Create GitHub Release
-        if: steps.bump.outputs.bumped == 'true'
+        if: steps.bump.outputs.bumped == 'true' && inputs.create-release
         run: |
           # Idempotent: the skip-existing-tags guard above already resolves a free
           # version, but re-check here so a rare race never fails the release step.

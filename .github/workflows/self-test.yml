@@ -45,5 +45,12 @@ jobs:
       - name: Node bump merge-trigger identity and mocked shell controls
         run: node tests/check-node-merge-trigger.cjs
 
+      - name: Install pinned test-only dependencies for workflow contract tests
+        run: npm ci --prefix tests
+
+      - name: Node bump release creation opt-out contract and expression controls
+        run: node tests/check-node-release-optout.cjs
+
       - name: GHCR centralized retention tag-protection regression suite
         run: node tests/check-ghcr-retention.test.cjs
+

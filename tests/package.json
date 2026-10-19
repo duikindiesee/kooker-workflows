@@ -1,0 +1,10 @@
+{
+  "name": "kooker-workflows-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated test-only dependencies for shared workflow contract validation",
+  "dependencies": {
+    "@actions/expressions": "0.3.61",
+    "yaml": "2.9.1"
+  }
+}
