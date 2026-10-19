@@ -49,11 +49,368 @@ jobs:
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Prune old image tags
-        uses: actions/delete-package-versions@v5
-        with:
-          package-name: ${{ inputs.package-name != '' && inputs.package-name || github.event.repository.name }}
-          package-type: 'container'
-          min-versions-to-keep: ${{ inputs.min-versions-to-keep }}
-          ignore-versions: ${{ inputs.ignore-versions }}
-          # Standard PAT required for destructive package ops in GHCR
-          token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+        shell: node {0}
+        env:
+          INPUT_PACKAGE_NAME: ${{ inputs.package-name != '' && inputs.package-name || github.event.repository.name }}
+          INPUT_MIN_VERSIONS_TO_KEEP: ${{ inputs.min-versions-to-keep }}
+          INPUT_IGNORE_VERSIONS: ${{ inputs.ignore-versions }}
+          INPUT_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          const https = require('node:https');
+          const http = require('node:http');
+          const { URL } = require('node:url');
+
+          const RATE_LIMIT = 100;
+          const MAX_PAGE_TRAVERSAL = 50; // Max 50 pages * 100 items = 5000 versions maximum
+          const REQUEST_TIMEOUT_MS = Number(process.env.GITHUB_REQUEST_TIMEOUT_MS) > 0 ? Number(process.env.GITHUB_REQUEST_TIMEOUT_MS) : 10000;
+          const STREAM_INACTIVITY_MS = Number(process.env.GITHUB_STREAM_INACTIVITY_MS) > 0 ? Number(process.env.GITHUB_STREAM_INACTIVITY_MS) : Math.min(REQUEST_TIMEOUT_MS, 5000);
+          const MAX_RESPONSE_BYTES = Number(process.env.GITHUB_MAX_RESPONSE_BYTES) > 0 ? Number(process.env.GITHUB_MAX_RESPONSE_BYTES) : 5 * 1024 * 1024;
+
+          const token = process.env.INPUT_TOKEN;
+          if (!token) {
+            console.error('FAIL: [ERR_AUTH_MISSING] Missing authentication token');
+            process.exit(1);
+          }
+
+          const rawOwner = (process.env.GITHUB_REPOSITORY_OWNER || '').trim();
+          const rawPackage = (process.env.INPUT_PACKAGE_NAME || '').trim();
+          if (!rawOwner || !rawPackage) {
+            console.error('FAIL: [ERR_CONFIG_MISSING] Missing owner or package-name');
+            process.exit(1);
+          }
+
+          const rawMinKeep = (process.env.INPUT_MIN_VERSIONS_TO_KEEP || '').trim();
+          if (!/^(0|[1-9][0-9]*)$/.test(rawMinKeep)) {
+            console.error('FAIL: [ERR_CONFIG_INVALID] Invalid min-versions-to-keep (must be non-negative integer)');
+            process.exit(1);
+          }
+          const minVersionsToKeep = Number(rawMinKeep);
+          if (!Number.isSafeInteger(minVersionsToKeep) || minVersionsToKeep < 0) {
+            console.error('FAIL: [ERR_CONFIG_RANGE] Invalid min-versions-to-keep (out of safe range)');
+            process.exit(1);
+          }
+
+          const rawRegex = (process.env.INPUT_IGNORE_VERSIONS || '').trim();
+          let ignoreRegex;
+          try {
+            ignoreRegex = new RegExp(rawRegex);
+          } catch (err) {
+            console.error('FAIL: [ERR_REGEX_INVALID] Invalid ignore-versions regex');
+            process.exit(1);
+          }
+
+          const baseUrlStr = process.env.GITHUB_API_URL || 'https://api.github.com';
+
+          function request(method, pathStr) {
+            return new Promise((resolve, reject) => {
+              const fullUrl = new URL(pathStr, baseUrlStr);
+              const transport = fullUrl.protocol === 'http:' ? http : https;
+              const options = {
+                method,
+                hostname: fullUrl.hostname,
+                port: fullUrl.port || (fullUrl.protocol === 'http:' ? 80 : 443),
+                path: fullUrl.pathname + fullUrl.search,
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Accept': 'application/vnd.github+json',
+                  'User-Agent': 'kooker-ghcr-retention'
+                },
+                timeout: REQUEST_TIMEOUT_MS
+              };
+
+              let byteCount = 0;
+              let inactivityTimer = null;
+              let absoluteDeadlineTimer = null;
+              let isSettled = false;
+              let clientRes = null;
+
+              function cleanupTimers() {
+                if (inactivityTimer) {
+                  clearTimeout(inactivityTimer);
+                  inactivityTimer = null;
+                }
+                if (absoluteDeadlineTimer) {
+                  clearTimeout(absoluteDeadlineTimer);
+                  absoluteDeadlineTimer = null;
+                }
+              }
+
+              function fail(err) {
+                if (isSettled) return;
+                isSettled = true;
+                cleanupTimers();
+                req.destroy();
+                if (clientRes) clientRes.destroy();
+                reject(err);
+              }
+
+              function succeed(val) {
+                if (isSettled) return;
+                isSettled = true;
+                cleanupTimers();
+                resolve(val);
+              }
+
+              function resetInactivityTimer() {
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                inactivityTimer = setTimeout(() => {
+                  fail(new Error('[ERR_RESPONSE_STALLED] Response data stream stalled'));
+                }, STREAM_INACTIVITY_MS);
+              }
+
+              // Separate NON-RESETTING absolute deadline covering request creation, socket connect, headers, and body EOF
+              absoluteDeadlineTimer = setTimeout(() => {
+                fail(new Error(`[ERR_REQUEST_DEADLINE] Total request deadline exceeded ${REQUEST_TIMEOUT_MS}ms`));
+              }, REQUEST_TIMEOUT_MS);
+
+              const req = transport.request(options, (res) => {
+                clientRes = res;
+                req.setTimeout(0); // Response headers received; inactivity and absolute deadline timers take over
+                let data = '';
+                res.setEncoding('utf8');
+                resetInactivityTimer();
+
+                res.on('data', chunk => {
+                  byteCount += Buffer.byteLength(chunk, 'utf8');
+                  if (byteCount > MAX_RESPONSE_BYTES) {
+                    fail(new Error(`[ERR_RESPONSE_OVERSIZE] Response exceeded byte limit of ${MAX_RESPONSE_BYTES} bytes`));
+                    return;
+                  }
+                  resetInactivityTimer();
+                  data += chunk;
+                });
+
+                res.on('end', () => {
+                  succeed({
+                    status: res.statusCode,
+                    headers: res.headers,
+                    body: data
+                  });
+                });
+
+                res.on('error', err => {
+                  fail(new Error(`[ERR_STREAM_ERROR] Response stream error: ${err.message}`));
+                });
+              });
+
+              req.on('timeout', () => {
+                fail(new Error(`[ERR_REQUEST_TIMEOUT] Request socket timed out after ${REQUEST_TIMEOUT_MS}ms`));
+              });
+
+              req.on('error', err => {
+                fail(new Error(`[ERR_NETWORK_ERROR] Network request error: ${err.message}`));
+              });
+
+              req.end();
+            });
+          }
+
+          async function fetchAllVersions(owner, packageName) {
+            const versions = [];
+            const seenIds = new Set();
+            let page = 1;
+            const perPage = 100;
+            let baseEndpoint = `/orgs/${encodeURIComponent(owner)}/packages/container/${encodeURIComponent(packageName)}/versions`;
+
+            while (true) {
+              if (page > MAX_PAGE_TRAVERSAL) {
+                throw new Error(`[ERR_PAGE_LIMIT_EXCEEDED] Pagination exceeded maximum limit of ${MAX_PAGE_TRAVERSAL} pages`);
+              }
+
+              const endpoint = `${baseEndpoint}?page=${page}&per_page=${perPage}`;
+              const res = await request('GET', endpoint);
+
+              if (page === 1 && res.status === 404) {
+                // Try fallback to /users endpoint for user accounts
+                const userEndpoint = `/users/${encodeURIComponent(owner)}/packages/container/${encodeURIComponent(packageName)}/versions`;
+                const userRes = await request('GET', `${userEndpoint}?page=${page}&per_page=${perPage}`);
+                if (userRes.status >= 200 && userRes.status < 300) {
+                  baseEndpoint = userEndpoint;
+                  let parsed;
+                  try {
+                    parsed = JSON.parse(userRes.body);
+                  } catch (e) {
+                    throw new Error('[ERR_JSON_PARSE] Malformed JSON in user packages API response');
+                  }
+                  if (!Array.isArray(parsed)) {
+                    throw new Error('[ERR_MALFORMED_RESPONSE] API response body is not an array');
+                  }
+                  if (parsed.length === 0) break;
+
+                  // Detect repeated full page / duplicate ID during pagination
+                  let newIdsInPage = 0;
+                  for (const item of parsed) {
+                    if (item && typeof item.id === 'number' && Number.isInteger(item.id) && item.id > 0) {
+                      if (seenIds.has(item.id)) {
+                        throw new Error(`[ERR_DUPLICATE_VERSION_ID] Duplicate version ID ${item.id} encountered during pagination`);
+                      }
+                      seenIds.add(item.id);
+                      newIdsInPage++;
+                    }
+                  }
+
+                  versions.push(...parsed);
+                  if (parsed.length < perPage) break;
+                  page++;
+                  continue;
+                } else {
+                  throw new Error(`[ERR_API_STATUS] Failed to list versions from org or user endpoint (HTTP ${userRes.status})`);
+                }
+              }
+
+              if (res.status < 200 || res.status >= 300) {
+                throw new Error(`[ERR_API_STATUS] Failed to list versions (HTTP ${res.status})`);
+              }
+
+              let parsed;
+              try {
+                parsed = JSON.parse(res.body);
+              } catch (e) {
+                throw new Error('[ERR_JSON_PARSE] Malformed JSON in API response');
+              }
+              if (!Array.isArray(parsed)) {
+                throw new Error('[ERR_MALFORMED_RESPONSE] API response body is not an array');
+              }
+              if (parsed.length === 0) break;
+
+              // Detect repeated page / duplicate ID during traversal
+              for (const item of parsed) {
+                if (item && typeof item.id === 'number' && Number.isInteger(item.id) && item.id > 0) {
+                  if (seenIds.has(item.id)) {
+                    throw new Error(`[ERR_DUPLICATE_VERSION_ID] Duplicate version ID ${item.id} encountered during pagination`);
+                  }
+                  seenIds.add(item.id);
+                }
+              }
+
+              versions.push(...parsed);
+              if (parsed.length < perPage) {
+                break;
+              }
+              page++;
+            }
+
+            return { versions, baseEndpoint };
+          }
+
+          async function run() {
+            console.log(`Starting tag-aware container retention for ${rawOwner}/${rawPackage}`);
+            console.log(`Config: minVersionsToKeep=${minVersionsToKeep}, ignoreRegex=${ignoreRegex}`);
+
+            let fetchResult;
+            try {
+              fetchResult = await fetchAllVersions(rawOwner, rawPackage);
+            } catch (err) {
+              console.error('FAIL during version retrieval / pagination (failing closed with 0 deletes):', err.message);
+              process.exit(1);
+            }
+
+            const { versions, baseEndpoint } = fetchResult;
+            console.log(`Total package versions fetched: ${versions.length}`);
+
+            // Strict metadata validation of version items before any deletion
+            const validatedIds = new Set();
+            for (const v of versions) {
+              if (typeof v.id !== 'number' || !Number.isInteger(v.id) || v.id <= 0) {
+                console.error('FAIL: [ERR_METADATA_ID] Encountered version with invalid id (must be positive integer)');
+                process.exit(1);
+              }
+              if (validatedIds.has(v.id)) {
+                console.error(`FAIL: [ERR_DUPLICATE_VERSION_ID] Encountered duplicate version id ${v.id} across enumeration`);
+                process.exit(1);
+              }
+              validatedIds.add(v.id);
+              if (typeof v.name !== 'string' || v.name.length === 0) {
+                console.error(`FAIL: [ERR_METADATA_NAME] Version ${v.id} lacks valid string name`);
+                process.exit(1);
+              }
+              if (typeof v.created_at !== 'string' || Number.isNaN(new Date(v.created_at).getTime())) {
+                console.error(`FAIL: [ERR_METADATA_TIMESTAMP] Version ${v.id} has invalid created_at timestamp`);
+                process.exit(1);
+              }
+              if (!v.metadata || !v.metadata.container || !Array.isArray(v.metadata.container.tags)) {
+                console.error(`FAIL: [ERR_METADATA_TAGS] Version ${v.id} lacks valid metadata.container.tags`);
+                process.exit(1);
+              }
+              for (const tag of v.metadata.container.tags) {
+                if (typeof tag !== 'string') {
+                  console.error(`FAIL: [ERR_METADATA_TAG_ITEM] Version ${v.id} has non-string tag element`);
+                  process.exit(1);
+                }
+              }
+            }
+
+            // Protection evaluation:
+            // A version is protected if ignoreRegex matches v.name OR ANY tag in metadata.container.tags.
+            const protectedVersions = [];
+            const eligibleVersions = [];
+
+            for (const v of versions) {
+              const tags = v.metadata.container.tags;
+              let isProtected = false;
+
+              if (ignoreRegex.test(v.name)) {
+                isProtected = true;
+              } else {
+                for (const tag of tags) {
+                  if (ignoreRegex.test(tag)) {
+                    isProtected = true;
+                    break;
+                  }
+                }
+              }
+
+              if (isProtected) {
+                protectedVersions.push(v);
+              } else {
+                eligibleVersions.push(v);
+              }
+            }
+
+            console.log(`Classification: ${protectedVersions.length} protected, ${eligibleVersions.length} eligible for deletion`);
+
+            // Sort eligible versions oldest-first: created_at asc, then id asc
+            eligibleVersions.sort((a, b) => {
+              const timeA = new Date(a.created_at).getTime();
+              const timeB = new Date(b.created_at).getTime();
+              if (timeA === timeB) {
+                return a.id - b.id;
+              }
+              return timeA - timeB;
+            });
+
+            // Compute deletion count respecting floor and batch rate limit:
+            // Upstream actions/delete-package-versions finalIds intent:
+            // filters protected versions first, then keeps minVersionsToKeep unprotected versions:
+            // toDelete = Math.min(eligibleVersions.length - minVersionsToKeep, RATE_LIMIT)
+            const allowedDeletions = eligibleVersions.length - minVersionsToKeep;
+            const toDeleteCount = Math.min(allowedDeletions, RATE_LIMIT);
+
+            if (toDeleteCount <= 0) {
+              console.log(`No versions need to be deleted (eligibleVersions.length=${eligibleVersions.length}, minVersionsToKeep=${minVersionsToKeep}).`);
+              return;
+            }
+
+            const targets = eligibleVersions.slice(0, toDeleteCount);
+            console.log(`Deleting ${targets.length} oldest unprotected version(s)...`);
+
+            for (const target of targets) {
+              const deleteEndpoint = `${baseEndpoint}/${target.id}`;
+              const res = await request('DELETE', deleteEndpoint);
+              if (res.status < 200 || res.status >= 300) {
+                console.error(`FAIL: [ERR_DELETE_FAILED] Failed to delete version ${target.id} (HTTP ${res.status})`);
+                process.exit(1);
+              }
+              console.log(`Deleted version ${target.id}`);
+            }
+
+            console.log(`Successfully completed GHCR retention. Deleted ${targets.length} version(s).`);
+          }
+
+          run().catch(err => {
+            console.error('Unhandled fatal error in retention runner:', err.message || err);
+            process.exit(1);
+          });
+

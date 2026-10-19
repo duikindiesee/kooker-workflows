@@ -164,6 +164,29 @@ jobs:
 
 ---
 
+### `ghcr-retention.yml` — Centralized container image retention (semver protected)
+
+Prunes old untagged and transient feature/renovate branch image versions from GHCR while strictly protecting semver release tags (`^v?[0-9]+\.[0-9]+\.[0-9]+$`). Evaluates policy against every actual tag in container metadata and protects the entire version if any tag matches.
+
+**Inputs:**
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `package-name` | ❌ | calling repo name | GHCR container package name |
+| `min-versions-to-keep` | ❌ | `60` | Minimum newest versions to keep |
+| `ignore-versions` | ❌ | `^v?[0-9]+\.[0-9]+\.[0-9]+$` | Regex of tags to preserve |
+
+**Secrets:** `MAVEN_PUBLISH_TOKEN` (required write token for package deletion)
+
+```yaml
+jobs:
+  retention:
+    uses: duikindiesee/kooker-workflows/.github/workflows/ghcr-retention.yml@main
+    secrets: inherit
+```
+
+---
+
 ## Organisation Setup
 
 For all repos in `duikindiesee` to consume these workflows, the org must have:
