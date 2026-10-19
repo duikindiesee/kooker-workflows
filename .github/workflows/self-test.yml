@@ -44,3 +44,6 @@ jobs:
 
       - name: Node bump merge-trigger identity and mocked shell controls
         run: node tests/check-node-merge-trigger.cjs
+
+      - name: GHCR centralized retention tag-protection regression suite
+        run: node tests/check-ghcr-retention.test.cjs
