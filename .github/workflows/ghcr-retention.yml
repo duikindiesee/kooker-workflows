@@ -48,6 +48,11 @@ jobs:
   prune-ghcr:
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Prune old image tags
         shell: node {0}
         env:
