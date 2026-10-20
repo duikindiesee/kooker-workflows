@@ -21,6 +21,11 @@ on:
         description: 'The new tag to deploy (e.g. sha-81df9cb)'
         required: true
         type: string
+      new_digest:
+        description: 'Optional canonical manifest digest (sha256:64hex). When provided, opt-in digest validation and digest-only Kustomize rendering are enforced.'
+        required: false
+        type: string
+        default: ''
       kustomize_path:
         description: 'Path within kooker-infra to the kustomization.yaml directory'
         required: true
@@ -43,6 +48,9 @@ jobs:
         env:
           IMAGE_NAME: ${{ inputs.image_name }}
           NEW_TAG: ${{ inputs.new_tag }}
+          NEW_DIGEST: ${{ inputs.new_digest }}
+          CALLER_REPO: ${{ github.repository }}
+          KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
         run: |
           set -euo pipefail
           if [[ ! "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_./-]+$ ]]; then
@@ -52,6 +60,30 @@ jobs:
           if [[ ! "$NEW_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
             echo "::error::new_tag is not a valid OCI tag"
             exit 1
+          fi
+
+          if [ -n "$NEW_DIGEST" ]; then
+            if [[ ! "$NEW_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "::error::new_digest must be an exact lowercase sha256:64hex digest string"
+              exit 1
+            fi
+            if [ "$CALLER_REPO" != "duikindiesee/sportifine-server" ]; then
+              echo "::error::Digest mode is restricted to authorized caller repository 'duikindiesee/sportifine-server', got '$CALLER_REPO'"
+              exit 1
+            fi
+            if [ "$IMAGE_NAME" != "ghcr.io/duikindiesee/sportifine-server" ]; then
+              echo "::error::Digest mode is restricted to image 'ghcr.io/duikindiesee/sportifine-server', got '$IMAGE_NAME'"
+              exit 1
+            fi
+            if [ "$KUSTOMIZE_PATH" != "manifests/overlays/develop/sportifine-server" ]; then
+              echo "::error::Digest mode is restricted to path 'manifests/overlays/develop/sportifine-server', got '$KUSTOMIZE_PATH'"
+              exit 1
+            fi
+            echo "mode=digest" >> "$GITHUB_OUTPUT"
+            echo "digest=$NEW_DIGEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=tag" >> "$GITHUB_OUTPUT"
+            echo "digest=" >> "$GITHUB_OUTPUT"
           fi
           echo "reference=${IMAGE_NAME}:${NEW_TAG}" >> "$GITHUB_OUTPUT"
 
@@ -65,13 +97,207 @@ jobs:
       - name: Set up Buildx for registry inspection
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up Node.js for digest inspection
+        if: steps.image.outputs.mode == 'digest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
       - name: Prove the exact image exists before changing GitOps
         shell: bash
         env:
           IMAGE_REFERENCE: ${{ steps.image.outputs.reference }}
+          EXPECTED_DIGEST: ${{ steps.image.outputs.digest }}
+          MODE: ${{ steps.image.outputs.mode }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "$IMAGE_REFERENCE"
+          if [ "$MODE" = "digest" ]; then
+            STDOUT_FILE=$(mktemp)
+            STDERR_FILE=$(mktemp)
+
+            kill_tree() {
+              local p="$1"
+              local g="$2"
+              if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+                local cpids
+                cpids=$(pgrep -P "$p" 2>/dev/null || true)
+                for c in $cpids; do
+                  kill_tree "$c" ""
+                done
+                kill -9 "$p" 2>/dev/null || true
+                wait "$p" 2>/dev/null || true
+              fi
+              if [ -n "$g" ] && [ "$g" -gt 1 ] 2>/dev/null; then
+                kill -9 -"$g" 2>/dev/null || true
+              fi
+            }
+
+            set -m
+            set +e
+            (
+              docker buildx imagetools inspect --format '{{json .Manifest}}' "$IMAGE_REFERENCE" > "$STDOUT_FILE" 2> "$STDERR_FILE"
+            ) &
+            PID=$!
+            PGID=$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ' || true)
+
+            TIMEOUT_LIMIT=30
+            MONITOR_RESULT=$(node -e '
+              const fs = require("node:fs");
+              const pid = parseInt(process.argv[1], 10);
+              const stdoutFile = process.argv[2];
+              const stderrFile = process.argv[3];
+              const timeoutSeconds = parseFloat(process.argv[4]);
+
+              const start = process.hrtime.bigint();
+              const timeoutNs = BigInt(Math.round(timeoutSeconds * 1e9));
+
+              function checkSize(file) {
+                try {
+                  return fs.statSync(file).size;
+                } catch (e) {
+                  return 0;
+                }
+              }
+
+              function isAlive(p) {
+                try {
+                  process.kill(p, 0);
+                  return true;
+                } catch (e) {
+                  return false;
+                }
+              }
+
+              let reason = "COMPLETED";
+
+              while (isAlive(pid)) {
+                const elapsedNs = process.hrtime.bigint() - start;
+                if (elapsedNs >= timeoutNs) {
+                  reason = "TIMEOUT";
+                  break;
+                }
+
+                if (checkSize(stdoutFile) > 65536) {
+                  reason = "STDOUT_CAP";
+                  break;
+                }
+
+                if (checkSize(stderrFile) > 16384) {
+                  reason = "STDERR_CAP";
+                  break;
+                }
+
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+              }
+
+              const elapsedSeconds = Number(process.hrtime.bigint() - start) / 1e9;
+              process.stdout.write(reason + ":" + elapsedSeconds.toFixed(4));
+            ' "$PID" "$STDOUT_FILE" "$STDERR_FILE" "$TIMEOUT_LIMIT")
+            MONITOR_EXIT=$?
+
+            if [ "$MONITOR_EXIT" -ne 0 ]; then
+              kill_tree "$PID" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection monitor failed with exit code $MONITOR_EXIT"
+              exit 1
+            fi
+
+            MONITOR_STATUS="${MONITOR_RESULT%%:*}"
+
+            if [ "$MONITOR_STATUS" = "TIMEOUT" ]; then
+              kill_tree "$PID" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection timed out after 30 seconds"
+              exit 1
+            fi
+
+            if [ "$MONITOR_STATUS" = "STDOUT_CAP" ]; then
+              kill_tree "$PID" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection exceeded stdout cap of 65536 bytes"
+              exit 1
+            fi
+
+            if [ "$MONITOR_STATUS" = "STDERR_CAP" ]; then
+              kill_tree "$PID" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection exceeded stderr cap of 16384 bytes"
+              exit 1
+            fi
+
+            if [ "$MONITOR_STATUS" != "COMPLETED" ]; then
+              kill_tree "$PID" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection monitor returned unexpected status '$MONITOR_STATUS'"
+              exit 1
+            fi
+
+            wait "$PID"
+            EXIT_CODE=$?
+
+            STDOUT_SIZE=$(wc -c < "$STDOUT_FILE" 2>/dev/null || echo 0)
+            STDERR_SIZE=$(wc -c < "$STDERR_FILE" 2>/dev/null || echo 0)
+
+            if [ "$STDOUT_SIZE" -gt 65536 ]; then
+              kill_tree "" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection exceeded stdout cap of 65536 bytes"
+              exit 1
+            fi
+
+            if [ "$STDERR_SIZE" -gt 16384 ]; then
+              kill_tree "" "$PGID"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              echo "::error::Registry inspection exceeded stderr cap of 16384 bytes"
+              exit 1
+            fi
+
+            if [ "$EXIT_CODE" -ne 0 ]; then
+              kill_tree "" "$PGID"
+              echo "::error::Registry inspection failed with exit code $EXIT_CODE"
+              rm -f "$STDOUT_FILE" "$STDERR_FILE"
+              exit 1
+            fi
+
+            node -e '
+              const fs = require("node:fs");
+              const expected = process.argv[1];
+              const file = process.argv[2];
+              try {
+                const content = fs.readFileSync(file, "utf8").trim();
+                if (!content) {
+                  console.error("::error::Empty registry inspection output");
+                  process.exit(1);
+                }
+                const parsed = JSON.parse(content);
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                  console.error("::error::Registry descriptor is not a JSON object");
+                  process.exit(1);
+                }
+                if (typeof parsed.digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(parsed.digest)) {
+                  console.error("::error::Registry descriptor missing or invalid canonical root digest");
+                  process.exit(1);
+                }
+                if (parsed.digest !== expected) {
+                  console.error(`::error::Remote manifest digest mismatch: expected ${expected}, got ${parsed.digest}`);
+                  process.exit(1);
+                }
+                process.exit(0);
+              } catch (err) {
+                console.error("::error::Malformed registry JSON output");
+                process.exit(1);
+              }
+            ' "$EXPECTED_DIGEST" "$STDOUT_FILE"
+
+            NODE_EXIT=$?
+            rm -f "$STDOUT_FILE" "$STDERR_FILE"
+            if [ "$NODE_EXIT" -ne 0 ]; then
+              exit 1
+            fi
+            echo "Remote canonical manifest digest verified: $EXPECTED_DIGEST"
+          else
+            docker buildx imagetools inspect "$IMAGE_REFERENCE"
+          fi
 
       - name: Checkout kooker-infra
         uses: actions/checkout@v4
@@ -158,42 +384,152 @@ jobs:
       - name: Install Kustomize
         uses: imranismail/setup-kustomize@v2
 
-      - name: Update Kustomize Image
+      - name: Set up Node.js for digest mode
+        if: steps.image.outputs.mode == 'digest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Validate shared workflow helper identity
+        if: steps.image.outputs.mode == 'digest'
+        shell: bash
+        env:
+          WORKFLOW_REPO: ${{ job.workflow_repository }}
+          WORKFLOW_PATH: ${{ job.workflow_file_path }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
-          cd infra/${{ inputs.kustomize_path }}
-          kustomize edit set image ${{ inputs.image_name }}=${{ inputs.image_name }}:${{ inputs.new_tag }}
+          set -euo pipefail
+          EXPECTED_REPO="duikindiesee/kooker-workflows"
+          EXPECTED_PATH=".github/workflows/gitops-sync.yml"
+
+          if [ "$WORKFLOW_REPO" != "$EXPECTED_REPO" ]; then
+            echo "::error::Invalid reusable workflow repository: '$WORKFLOW_REPO' (expected '$EXPECTED_REPO'). Fails closed."
+            exit 1
+          fi
+
+          if [ "$WORKFLOW_PATH" != "$EXPECTED_PATH" ]; then
+            echo "::error::Invalid reusable workflow file path: '$WORKFLOW_PATH' (expected '$EXPECTED_PATH'). Fails closed."
+            exit 1
+          fi
+
+          if [[ ! "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid reusable workflow SHA: '$WORKFLOW_SHA' (must be 40 lowercase hex characters). Fails closed."
+            exit 1
+          fi
+
+          echo "Verified shared workflow identity: $WORKFLOW_REPO / $WORKFLOW_PATH @ $WORKFLOW_SHA"
+
+      - name: Checkout shared workflow helper
+        if: steps.image.outputs.mode == 'digest'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .shared-workflows
+          sparse-checkout: |
+            scripts/lib
+            scripts/update-gitops-digest.mjs
+            tests/package.json
+            tests/package-lock.json
+          sparse-checkout-cone-mode: false
+
+      - name: Verify checked-out helper source HEAD
+        if: steps.image.outputs.mode == 'digest'
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ ! -d ".shared-workflows/.git" ] && [ ! -f ".shared-workflows/.git" ]; then
+            echo "::error::Shared workflow helper checkout missing .git directory. Fails closed."
+            exit 1
+          fi
+
+          ACTUAL_HEAD="$(git -C .shared-workflows rev-parse HEAD)"
+          if [ "$ACTUAL_HEAD" != "$EXPECTED_SHA" ]; then
+            echo "::error::Shared workflow helper HEAD mismatch: expected '$EXPECTED_SHA', got '$ACTUAL_HEAD'. Fails closed."
+            exit 1
+          fi
+
+          echo "Verified shared workflow helper HEAD matches expected SHA: $ACTUAL_HEAD"
+
+      - name: Install pinned parser dependencies
+        if: steps.image.outputs.mode == 'digest'
+        run: npm ci --prefix .shared-workflows/tests --ignore-scripts
+
+      - name: Update Kustomize Image
+        shell: bash
+        env:
+          MODE: ${{ steps.image.outputs.mode }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          NEW_TAG: ${{ inputs.new_tag }}
+          NEW_DIGEST: ${{ inputs.new_digest }}
+          CALLER_REPO: ${{ github.repository }}
+          KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
+          INFRA_DIR: infra
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "digest" ]; then
+            NODE_PATH=".shared-workflows/tests/node_modules" \
+            node .shared-workflows/scripts/update-gitops-digest.mjs
+          else
+            cd infra/${KUSTOMIZE_PATH}
+            kustomize edit set image ${IMAGE_NAME}=${IMAGE_NAME}:${NEW_TAG}
+          fi
 
       - name: Open the deploy PR
         id: pr
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          MODE: ${{ steps.image.outputs.mode }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          NEW_TAG: ${{ inputs.new_tag }}
+          NEW_DIGEST: ${{ inputs.new_digest }}
+          KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          RUN_ID: ${{ github.run_id }}
+          CALLER_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           cd infra
           if git diff --quiet; then
             echo "No changes to deploy."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          SERVICE=$(basename "${{ inputs.kustomize_path }}")
-          BRANCH="gitops/${SERVICE}-${{ inputs.new_tag }}-${{ github.run_id }}"
+          SERVICE=$(basename "${KUSTOMIZE_PATH}")
+          if [ "$MODE" = "digest" ]; then
+            BRANCH="gitops/${SERVICE}-digest-${RUN_ID}"
+            COMMIT_MSG="chore(gitops): auto-deploy ${IMAGE_NAME} to ${NEW_DIGEST}"
+            PR_TITLE="chore(gitops): auto-deploy ${SERVICE} to ${NEW_DIGEST}"
+            PR_BODY="Automated GitOps digest pin of ${IMAGE_NAME} to ${NEW_DIGEST} (version ${NEW_TAG}) at ${KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
+          else
+            BRANCH="gitops/${SERVICE}-${NEW_TAG}-${RUN_ID}"
+            COMMIT_MSG="chore(gitops): auto-deploy ${IMAGE_NAME} to ${NEW_TAG}"
+            PR_TITLE="chore(gitops): auto-deploy ${SERVICE} to ${NEW_TAG}"
+            PR_BODY="Automated GitOps pin of ${IMAGE_NAME} to ${NEW_TAG} at ${KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add .
-          git commit -m "chore(gitops): auto-deploy ${{ inputs.image_name }} to ${{ inputs.new_tag }}"
+          git commit -m "$COMMIT_MSG"
           git push origin "$BRANCH"
           PR_URL=$(gh pr create \
             --repo duikindiesee/kooker-infra \
-            --base "${{ inputs.target_branch }}" \
+            --base "${TARGET_BRANCH}" \
             --head "$BRANCH" \
-            --title "chore(gitops): auto-deploy ${SERVICE} to ${{ inputs.new_tag }}" \
-            --body "Automated GitOps pin of ${{ inputs.image_name }} to ${{ inputs.new_tag }} at ${{ inputs.kustomize_path }}. Opened by gitops-sync from ${{ github.repository }} run ${{ github.run_id }}; approved and merged by the deploy approver identity.")
+            --title "$PR_TITLE" \
+            --body "$PR_BODY")
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "Opened deploy PR: $PR_URL"
 
       - name: Approve and merge as the deploy approver
         if: steps.pr.outputs.changed == 'true'
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITOPS_APPROVER_TOKEN }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
