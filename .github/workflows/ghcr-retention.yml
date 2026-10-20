@@ -49,7 +49,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
