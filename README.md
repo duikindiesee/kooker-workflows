@@ -69,7 +69,23 @@ jobs:
 
 ### `flyway-lint.yml` — Flyway migration detector
 
-Detects new or modified SQL migration files in a PR. Outputs `has_db_changes=true` which downstream jobs use to decide whether a DB-aware version bump is needed.
+Detects new or modified SQL migration files and applies a limited breaking-pattern scan when a consuming workflow calls it. Outputs `has_db_changes=true` which downstream jobs can use for DB-aware version decisions. The output alone does not prove compatibility or merge-blocking enforcement.
+
+**Verified behavior at `27dc1ebf` (19 October 2026):**
+
+- The workflow scans added/modified files under one configured `migration-path`. PR detection uses the base-branch merge-base; push detection uses only `HEAD~1..HEAD`. Deleted files and changes earlier in a multi-commit push are not covered by that detection.
+- SQL is scanned one physical line at a time. Multiline `ALTER TABLE` statements and alternate syntax, including `MODIFY` without `COLUMN`, can evade the patterns. A line containing `kooker:allow-breaking` is skipped without verifying a ticket, approver or authorization. A marker on the previous comment line does not exempt the following statement. These are implementation behaviors, not an approved exception process.
+- Failed diff commands are converted to an empty change list, and a missing migration directory skips the naming check. A successful run can therefore mean no files were inspected.
+- The optional [pre-commit hook](scripts/lint-migrations.sh) shares the line-based approach and supports `KOOKER_LINT_MODE=warn`. A local hook, particularly warn mode, is advisory; it does not establish an authoritative required CI check.
+- Reusable-workflow availability is separate from service adoption. Inspect the consumer's events, path filters, configured migration paths, skip/error handling and required rulesets/check contexts before claiming a merge is blocked. This audit did not establish fleet-wide enforcement.
+
+**Additive-only policy and controlled exceptions — review target:**
+
+Compatible `CREATE` and `ALTER TABLE ... ADD` are additive operations. Evaluate defaults, nullability, constraints, locking and old-reader compatibility as part of review. A safe, bounded backfill can accompany expansion; do not classify every `ALTER` or backfill as destructive. Type changes, renames, removals, truncation, destructive DML and index/constraint changes require explicit compatibility and retention assessment. Preserve applied migration history; introduce a new reviewed migration instead of rewriting or deleting applied files.
+
+The intended normal route is expand, preserve old-reader compatibility, backfill with restart/concurrency validation, switch readers, and explicitly decide retention. A contract-phase removal is a separately approved exception to additive-only work. A comment alone is insufficient evidence of that approval. The proposed exception record binds a reason, existing ticket, authorized approver, exact revision/service/statements and expiry to compatibility/data-retention assessment, recovery evidence and bounded verification/rollback. Operator acceptance of this policy and independent source review precede implementation; this documentation does not activate a new guard, disable existing exceptions or authorize a database operation.
+
+Tracked review work: [shared guard hardening](https://zaarwin.kooker.co.za/workstreams/tasks/d846c81e-6550-47ae-9dc5-10528f4b43b2), [per-service adoption and required-check verification](https://zaarwin.kooker.co.za/workstreams/tasks/01b2f4e5-cafe-445a-a783-29c4ed289ec2), and [policy/operator review](https://zaarwin.kooker.co.za/workstreams/tasks/9d45284a-f7e1-4cb2-8bf6-bbe03ae86f11). Acceptance includes statement-aware parsing, immutable/deleted history protection, complete PR/push diffs, fail-closed path/diff errors, approved exceptions and actual consumer positive/negative fixtures. Source, hosted CI, configured required checks and service adoption are separate evidence.
 
 **Inputs:**
 
