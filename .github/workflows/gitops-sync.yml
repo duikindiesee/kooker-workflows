@@ -99,7 +99,7 @@ jobs:
 
       - name: Set up Node.js for digest inspection
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -386,7 +386,7 @@ jobs:
 
       - name: Set up Node.js for digest mode
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
