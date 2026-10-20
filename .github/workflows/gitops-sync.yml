@@ -300,7 +300,7 @@ jobs:
           fi
 
       - name: Checkout kooker-infra
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: duikindiesee/kooker-infra
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
@@ -421,7 +421,7 @@ jobs:
 
       - name: Checkout shared workflow helper
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
