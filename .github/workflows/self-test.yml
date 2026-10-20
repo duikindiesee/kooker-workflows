@@ -54,3 +54,13 @@ jobs:
       - name: GHCR centralized retention tag-protection regression suite
         run: node tests/check-ghcr-retention.test.cjs
 
+      - name: Set up Kustomize for GitOps integration tests
+        uses: imranismail/setup-kustomize@v2
+        with:
+          kustomize-version: 5.7.1
+
+      - name: GitOps digest supplementary contract checks (D01-D22 static/copied parsers)
+        run: node tests/check-gitops-digest.test.cjs
+
+      - name: GitOps digest runtime regression suite (actual production steps and consumer CLI)
+        run: node tests/check-gitops-digest-integration.cjs
