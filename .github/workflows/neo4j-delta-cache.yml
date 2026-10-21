@@ -96,6 +96,41 @@ jobs:
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
         run: |
+          neo4j_post() {
+            local payload="$1"
+            local path_hint="${2:-commit}"
+            local response
+            local status
+            local body
+
+            response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "$NEO4J_USER:$NEO4J_PASS" \
+              -d "$payload")
+            status=$(printf "%s" "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+            body=$(printf "%s" "$response" | sed '$d')
+
+            if [ -z "$status" ]; then
+              echo "Neo4j Error ($path_hint): missing HTTP status" >&2
+              exit 1
+            fi
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Neo4j Error ($path_hint): HTTP $status" >&2
+              echo "$body" >&2
+              exit 1
+            fi
+            if ! ERRORS=$(echo "$body" | jq -r '.errors | length // 0' 2>/dev/null); then
+              echo "Neo4j Error ($path_hint): non-JSON/invalid response" >&2
+              echo "$body" >&2
+              exit 1
+            fi
+            if [ "$ERRORS" -gt 0 ]; then
+              echo "Neo4j Error ($path_hint):" >&2
+              echo "$body" | jq '.errors' >&2
+              exit 1
+            fi
+          }
+
           REPO="${{ steps.meta.outputs.repo }}"
           SHA="${{ steps.meta.outputs.sha }}"
           TS="${{ steps.meta.outputs.ts }}"
@@ -113,15 +148,7 @@ jobs:
               }]
             }')
 
-          RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
-            -H "Content-Type: application/json" \
-            -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "$PAYLOAD")
-          if [ "$(echo "$RESPONSE" | jq -r '.errors | length')" -gt 0 ]; then
-            echo "Neo4j Error:" >&2
-            echo "$RESPONSE" | jq '.errors' >&2
-            exit 1
-          fi
+          neo4j_post "$PAYLOAD" "commit-${SHA}"
 
       - name: Cache changed files
         env:
@@ -129,6 +156,43 @@ jobs:
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
         run: |
+          neo4j_post() {
+            local payload="$1"
+            local path_hint="${2:-file}"
+            local response
+            local status
+            local body
+
+            response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "$NEO4J_USER:$NEO4J_PASS" \
+              -d "$payload")
+            status=$(printf "%s" "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+            body=$(printf "%s" "$response" | sed '$d')
+
+            if [ -z "$status" ]; then
+              echo "Neo4j Error ($path_hint): missing HTTP status" >&2
+              exit 1
+            fi
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Neo4j Error ($path_hint): HTTP $status" >&2
+              echo "$body" >&2
+              exit 1
+            fi
+            if [ -n "$body" ]; then
+              if ! ERRORS=$(echo "$body" | jq -r '.errors | length // 0' 2>/dev/null); then
+                echo "Neo4j Error ($path_hint): non-JSON/invalid response" >&2
+                echo "$body" >&2
+                exit 1
+              fi
+              if [ "$ERRORS" -gt 0 ]; then
+                echo "Neo4j Error ($path_hint):" >&2
+                echo "$body" | jq '.errors' >&2
+                exit 1
+              fi
+            fi
+          }
+
           REPO="${{ steps.meta.outputs.repo }}"
           SHA="${{ steps.meta.outputs.sha }}"
 
@@ -161,11 +225,7 @@ jobs:
                 }]
               }')
 
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
-              -H "Content-Type: application/json" \
-              -u "$NEO4J_USER:$NEO4J_PASS" \
-              -d "$PAYLOAD")
-            echo "$HTTP_CODE $fp"
+            neo4j_post "$PAYLOAD" "$fp"
           done < /tmp/changed_files.txt
 
       - name: Sync Memory Bank node (if changed)
@@ -175,6 +235,41 @@ jobs:
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
         run: |
+          neo4j_post() {
+            local payload="$1"
+            local path_hint="${2:-memory-bank}"
+            local response
+            local status
+            local body
+
+            response=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              -u "$NEO4J_USER:$NEO4J_PASS" \
+              -d "$payload")
+            status=$(printf "%s" "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+            body=$(printf "%s" "$response" | sed '$d')
+
+            if [ -z "$status" ]; then
+              echo "Neo4j Error ($path_hint): missing HTTP status" >&2
+              exit 1
+            fi
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "Neo4j Error ($path_hint): HTTP $status" >&2
+              echo "$body" >&2
+              exit 1
+            fi
+            if ! ERRORS=$(echo "$body" | jq -r '.errors | length // 0' 2>/dev/null); then
+              echo "Neo4j Error ($path_hint): non-JSON/invalid response" >&2
+              echo "$body" >&2
+              exit 1
+            fi
+            if [ "$ERRORS" -gt 0 ]; then
+              echo "Neo4j Error ($path_hint):" >&2
+              echo "$body" | jq '.errors' >&2
+              exit 1
+            fi
+          }
+
           if grep -q "irwins_memory_bank" /tmp/changed_files.txt 2>/dev/null; then
             echo "Memory bank changed — updating :Memory node..."
             CONTENT=$(python3 -c "import json; print(json.dumps(open('docs/irwins_memory_bank.md').read()))")
@@ -189,15 +284,7 @@ jobs:
                 }]
               }')
 
-            RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
-            -H "Content-Type: application/json" \
-            -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "$PAYLOAD")
-          if [ "$(echo "$RESPONSE" | jq -r '.errors | length')" -gt 0 ]; then
-            echo "Neo4j Error:" >&2
-            echo "$RESPONSE" | jq '.errors' >&2
-            exit 1
-          fi
+            neo4j_post "$PAYLOAD" "memory-bank"
             echo "Done."
           else
             echo "Memory bank unchanged — skipping."
