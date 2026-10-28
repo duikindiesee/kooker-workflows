@@ -101,7 +101,7 @@ jobs:
         if: steps.image.outputs.mode == 'digest'
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Prove the exact image exists before changing GitOps
         shell: bash
@@ -388,7 +388,7 @@ jobs:
         if: steps.image.outputs.mode == 'digest'
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Validate shared workflow helper identity
         if: steps.image.outputs.mode == 'digest'
