@@ -37,7 +37,7 @@ jobs:
       - name: Set up Node.js for version-bump contract tests
         uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Node version-bump package-only regression suite
         run: bash tests/check-node-version-bump.test.sh
