@@ -4,7 +4,7 @@ name: Flyway Lint
 # Outputs has_db_changes=true if new/modified .sql files are detected.
 #
 # Usage in consuming repos:
-#   uses: duikindiesee/kooker-workflows/.github/workflows/flyway-lint.yml@main
+#   uses: duikindiesee/kooker-workflows/.github/workflows/flyway-lint.yml@<commit-sha>
 #   with:
 #     migration-path: kooker-service-user-app/src/main/resources/db/migration
 
@@ -20,10 +20,15 @@ on:
         description: "'true' if new/modified migration files were found in this PR"
         value: ${{ jobs.lint.outputs.has_db_changes }}
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   lint:
+    permissions:
+      contents: read
     # Uses the proven kooker1-org self-hosted pool (see org-runner-canary.yml in kooker-infra and
     # maven-version-bump.yml/ghcr-retention.yml/gitops-sync.yml in this repo) -- not the retired
     # [self-hosted, local-linux] label this job was moved off of.
@@ -33,57 +38,84 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect new/changed migration files
         id: detect
+        shell: bash
+        env:
+          MIGRATION_PATH: ${{ inputs.migration-path }}
         run: |
-          MIGRATION_PATH="${{ inputs.migration-path }}"
+          set -euo pipefail
+          if [ -z "$MIGRATION_PATH" ] || [[ ! "$MIGRATION_PATH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$MIGRATION_PATH" == /* ]] || [[ "$MIGRATION_PATH" == ~* ]] || [[ "$MIGRATION_PATH" == -* ]] || [[ "$MIGRATION_PATH" =~ (^|/)\.\.(/|$) ]]; then
+            echo "::error::Invalid migration-path '$MIGRATION_PATH': must be a clean relative path without '..', leading '/', '~', '-', or special characters."
+            exit 1
+          fi
 
           # Branch cleanly on event type:
-          #   PR builds: use origin/<base-branch>...HEAD (reliable)
-          #   Push builds: use HEAD~1..HEAD (no GITHUB_BASE_REF available)
+          #   PR builds: use origin/<base-branch>...HEAD (fail closed if ref missing)
+          #   Push builds: use HEAD~1..HEAD (or empty tree on initial commit)
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            # Pull request context — compare against the PR base branch
-            CHANGED=$(git diff --name-only --diff-filter=AM "origin/${GITHUB_BASE_REF}...HEAD" -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+            if ! git rev-parse --verify "origin/${GITHUB_BASE_REF}" >/dev/null 2>&1; then
+              echo "::error::Base ref 'origin/${GITHUB_BASE_REF}' is unavailable for migration diff."
+              exit 1
+            fi
+            CHANGED="$(git diff --name-only --diff-filter=AM "origin/${GITHUB_BASE_REF}...HEAD" -- "${MIGRATION_PATH}")"
+          elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            CHANGED="$(git diff --name-only --diff-filter=AM HEAD~1..HEAD -- "${MIGRATION_PATH}")"
           else
-            # Push context — compare against the previous commit
-            CHANGED=$(git diff --name-only --diff-filter=AM HEAD~1..HEAD -- "${MIGRATION_PATH}" 2>/dev/null || echo "")
+            EMPTY_TREE="$(git hash-object -t tree /dev/null)"
+            CHANGED="$(git diff --name-only --diff-filter=AM "${EMPTY_TREE}..HEAD" -- "${MIGRATION_PATH}")"
           fi
 
           if [ -n "$CHANGED" ]; then
-            echo "has_db_changes=true" >> $GITHUB_OUTPUT
+            echo "has_db_changes=true" >> "$GITHUB_OUTPUT"
             echo "Changed migration files:"
-            echo "$CHANGED"
+            printf '%s\n' "$CHANGED"
           else
-            echo "has_db_changes=false" >> $GITHUB_OUTPUT
+            echo "has_db_changes=false" >> "$GITHUB_OUTPUT"
             echo "No migration files changed."
           fi
-          printf 'CHANGED_FILES<<EOF\n%s\nEOF\n' "$CHANGED" >> $GITHUB_ENV
+
+          DELIM="FLYWAY_EOF_$(date +%s)_$$_${RANDOM}"
+          while printf '%s\n' "$CHANGED" | grep -qF "$DELIM"; do
+            DELIM="${DELIM}_${RANDOM}"
+          done
+          printf 'CHANGED_FILES<<%s\n%s\n%s\n' "$DELIM" "$CHANGED" "$DELIM" >> "$GITHUB_ENV"
 
       - name: Validate naming convention
+        shell: bash
+        env:
+          MIGRATION_PATH: ${{ inputs.migration-path }}
         run: |
-          MIGRATION_PATH="${{ inputs.migration-path }}"
+          set -euo pipefail
+          if [ -z "$MIGRATION_PATH" ] || [[ ! "$MIGRATION_PATH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$MIGRATION_PATH" == /* ]] || [[ "$MIGRATION_PATH" == ~* ]] || [[ "$MIGRATION_PATH" == -* ]] || [[ "$MIGRATION_PATH" =~ (^|/)\.\.(/|$) ]]; then
+            echo "::error::Invalid migration-path '$MIGRATION_PATH'."
+            exit 1
+          fi
           if [ ! -d "$MIGRATION_PATH" ]; then
             echo "No directory '$MIGRATION_PATH' — skipping naming check."
             exit 0
           fi
           FAIL=0
-          while IFS= read -r file; do
-            fname=$(basename "$file")
+          while IFS= read -r -d '' file; do
+            fname="$(basename -- "$file")"
             if [[ ! "$fname" =~ ^V[0-9]+(\.[0-9]+)*__[a-zA-Z0-9_]+\.sql$ ]]; then
               echo "::error file=$file::Naming violation: '$fname' must match V<N>__<description>.sql"
               FAIL=1
             fi
-          done < <(find "$MIGRATION_PATH" -name '*.sql' 2>/dev/null)
+          done < <(find "$MIGRATION_PATH" -type f -name '*.sql' -print0)
           [ $FAIL -eq 0 ] && echo "Naming convention OK."
           exit $FAIL
 
       - name: Check for breaking SQL patterns
         if: env.CHANGED_FILES != ''
+        shell: bash
         run: |
+          set -euo pipefail
           BREAKING_PATTERNS=(
             '(^|[[:space:]])DROP[[:space:]]+TABLE'
             '(^|[[:space:]])DROP[[:space:]]+COLUMN'
@@ -97,22 +129,59 @@ jobs:
 
           FAIL=0
 
-          while IFS= read -r sql_file; do
+          while IFS= read -r sql_file || [ -n "$sql_file" ]; do
             [ -z "$sql_file" ] && continue
-            [ -f "$sql_file" ] || continue
+            if [ ! -f "$sql_file" ]; then
+              echo "::error::Listed migration file '$sql_file' does not exist."
+              FAIL=1
+              continue
+            fi
             echo "--- Scanning: $sql_file ---"
             LINE_NUM=0
-            while IFS= read -r line; do
-              LINE_NUM=$((LINE_NUM+1))
-              # Skip SQL single-line comments (--) and blank lines to avoid
-              # false positives where pattern keywords appear in comments.
-              # Inline kooker:allow-breaking annotation on the same line also bypasses.
-              TRIMMED=$(echo "$line" | sed 's/^[[:space:]]*//')
+            IN_BLOCK_COMMENT=0
+            while IFS= read -r line || [ -n "$line" ]; do
+              LINE_NUM=$((LINE_NUM + 1))
+              line="${line%$'\r'}"
+              if printf '%s\n' "$line" | grep -qi 'kooker:allow-breaking'; then
+                continue
+              fi
+
+              # Strip /* ... */ block comments across single or multiple lines while
+              # preserving code outside comment spans on the same line.
+              CLEAN=""
+              REST="$line"
+              while [ -n "$REST" ]; do
+                if [ "$IN_BLOCK_COMMENT" -eq 1 ]; then
+                  if [[ "$REST" == *"*/"* ]]; then
+                    REST="${REST#*\*/}"
+                    IN_BLOCK_COMMENT=0
+                  else
+                    REST=""
+                  fi
+                else
+                  if [[ "$REST" == *"/*"* ]]; then
+                    CLEAN="${CLEAN}${REST%%"/*"*}"
+                    AFTER="${REST#*"/*"}"
+                    if [[ "$AFTER" == *"*/"* ]]; then
+                      REST="${AFTER#*"*/"}"
+                    else
+                      IN_BLOCK_COMMENT=1
+                      REST=""
+                    fi
+                  else
+                    CLEAN="${CLEAN}${REST}"
+                    REST=""
+                  fi
+                fi
+              done
+
+              TRIMMED="${CLEAN#"${CLEAN%%[![:space:]]*}"}"
+              [ -z "$TRIMMED" ] && continue
               [[ "$TRIMMED" == --* ]] && continue
-              echo "$line" | grep -qi 'kooker:allow-breaking' && continue
-              UPPER=$(echo "$line" | tr '[:lower:]' '[:upper:]')
+
+              UPPER="$(printf '%s\n' "$CLEAN" | tr '[:lower:]' '[:upper:]')"
               for PAT in "${BREAKING_PATTERNS[@]}"; do
-                if echo "$UPPER" | grep -qE "$PAT"; then
+                if printf '%s\n' "$UPPER" | grep -qE "$PAT"; then
                   echo "::error file=$sql_file,line=$LINE_NUM::BREAKING CHANGE: $line"
                   FAIL=1
                 fi
@@ -131,39 +200,45 @@ jobs:
             exit 1
           fi
 
-          echo "No breaking SQL patterns detected. ✅"
+          echo "No breaking SQL patterns detected."
 
       - name: Validate migrator profile safety
+        shell: bash
         run: |
+          set -euo pipefail
           # ──────────────────────────────────────────────────────────────────
-          # Ensures application-migrator.yml explicitly disables Spring JVM daemons
-          # so ArgoCD Jobs do not hang infinitely after Flyway completes.
+          # Ensures every application-migrator.y*ml explicitly disables Spring
+          # JVM daemons so ArgoCD Jobs do not hang infinitely after Flyway completes.
           # ──────────────────────────────────────────────────────────────────
-          MIGRATOR_CONFIG=$(find . -name "application-migrator.yml" | head -n 1)
-          if [ -n "$MIGRATOR_CONFIG" ]; then
+          FOUND_ANY=0
+          FAIL=0
+          while IFS= read -r -d '' MIGRATOR_CONFIG; do
+            FOUND_ANY=1
             echo "Checking $MIGRATOR_CONFIG for mandatory safety properties..."
-            FAIL=0
-            
+
             if [ "$(yq '.spring.cloud.config.enabled' "$MIGRATOR_CONFIG")" != "false" ]; then
               echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'spring.cloud.config.enabled: false'."
               FAIL=1
             fi
-            
+
             if [ "$(yq '.eureka.client.enabled' "$MIGRATOR_CONFIG")" != "false" ]; then
               echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'eureka.client.enabled: false'."
               FAIL=1
             fi
-            
+
             if [ "$(yq '.management.endpoints.enabled-by-default' "$MIGRATOR_CONFIG")" != "false" ]; then
               echo "::error file=$MIGRATOR_CONFIG::Missing or invalid 'management.endpoints.enabled-by-default: false'."
               FAIL=1
             fi
-            
-            if [ $FAIL -ne 0 ]; then
-              echo "Migrator profile is unsafe. It will cause Kubernetes sync Jobs to hang indefinitely."
-              exit 1
-            fi
-            echo "Migrator profile passed safely. ✅"
-          else
-            echo "No application-migrator.yml found, skipping safety validation."
+          done < <(find . \( -path '*/target/*' -o -path '*/.git/*' -o -path '*/node_modules/*' \) -prune -o \( -name 'application-migrator.yml' -o -name 'application-migrator.yaml' \) -type f -print0)
+
+          if [ "$FOUND_ANY" -eq 0 ]; then
+            echo "No application-migrator.y*ml found, skipping safety validation."
+            exit 0
           fi
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "Migrator profile is unsafe. It will cause Kubernetes sync Jobs to hang indefinitely."
+            exit 1
+          fi
+          echo "All migrator profiles passed safely."

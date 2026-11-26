@@ -63,8 +63,22 @@ ALLOW_ABSENT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --root) ROOT="$2"; shift 2 ;;
-    --minimum) MINIMUM="$2"; shift 2 ;;
+    --root)
+      if [ $# -lt 2 ]; then
+        echo "[jdk25-guard] --root requires a directory argument" >&2
+        exit 1
+      fi
+      ROOT="$2"
+      shift 2
+      ;;
+    --minimum)
+      if [ $# -lt 2 ]; then
+        echo "[jdk25-guard] --minimum requires an integer argument" >&2
+        exit 1
+      fi
+      MINIMUM="$2"
+      shift 2
+      ;;
     --allow-absent) ALLOW_ABSENT=1; shift ;;
     -h|--help)
       sed -n '2,45p' "$0"
@@ -77,8 +91,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if ! [[ "$MINIMUM" =~ ^[0-9]+$ ]]; then
-  echo "[jdk25-guard] --minimum must be a positive integer, got: $MINIMUM" >&2
+if ! [[ "$MINIMUM" =~ ^[1-9][0-9]*$ ]]; then
+  echo "[jdk25-guard] --minimum must be a positive integer >= 1, got: $MINIMUM" >&2
   exit 1
 fi
 
@@ -88,9 +102,12 @@ if [ ! -d "$ROOT" ]; then
 fi
 
 # ── Discover every pom.xml and toolchains.xml under ROOT ────────────────────
-mapfile -t POM_FILES < <(find "$ROOT" \
+POM_FILES=()
+while IFS= read -r -d '' f; do
+  POM_FILES+=("$f")
+done < <(find "$ROOT" \
   \( -path '*/target/*' -o -path '*/.git/*' -o -path '*/node_modules/*' \) -prune -o \
-  \( -name 'pom.xml' -o -name 'toolchains.xml' \) -type f -print | sort)
+  \( -name 'pom.xml' -o -name 'toolchains.xml' \) -type f -print0 | sort -z)
 
 if [ "${#POM_FILES[@]}" -eq 0 ]; then
   echo "[jdk25-guard] No pom.xml or toolchains.xml found under $ROOT — nothing to check."
@@ -98,29 +115,129 @@ if [ "${#POM_FILES[@]}" -eq 0 ]; then
 fi
 
 # ── Extract every Java-version-relevant declaration from one file ───────────
+# Strips XML comments (single-line and multi-line) and handles both single-line
+# and multi-line tags as well as single-line <jdk><version>N</version></jdk>.
 # Emits "LINE<TAB>TAG<TAB>RAWVALUE" per match, one per line, to stdout.
 collect_declarations() {
   local file="$1"
-  # Simple single-line tags with numeric-or-${property} content only — this
-  # deliberately excludes unrelated same-named tags (e.g. an assembly
-  # plugin's <source> pointing at a file path) which never hold a bare
-  # number or property reference here in practice.
-  grep -nE '<(maven\.compiler\.release|maven\.compiler\.source|maven\.compiler\.target|release|source|target)>[[:space:]]*(\$\{[A-Za-z0-9_.]+\}|[0-9]+(\.[0-9]+)?)[[:space:]]*</\1>' "$file" \
-    | sed -E 's/^([0-9]+):[[:space:]]*<([a-zA-Z0-9_.]+)>[[:space:]]*(.*[^[:space:]])[[:space:]]*<\/\2>.*/\1\t\2\t\3/'
-
-  # Toolchain requirement: a <jdk>...<version>N</version>...</jdk> block,
-  # either inside maven-toolchains-plugin config in pom.xml or in a
-  # standalone toolchains.xml. awk tracks the innermost <jdk> block by line
-  # range so a <version> outside any <jdk> block (e.g. the plugin's own
-  # <version>3.1.0</version>) is never mistaken for a toolchain requirement.
   awk '
-    /<jdk>/ { in_jdk = 1 }
-    /<\/jdk>/ { in_jdk = 0 }
-    in_jdk && match($0, /<version>[[:space:]]*([0-9]+(\.[0-9]+)?|\$\{[A-Za-z0-9_.]+\})[[:space:]]*<\/version>/) {
-      val = $0
-      sub(/.*<version>[[:space:]]*/, "", val)
-      sub(/[[:space:]]*<\/version>.*/, "", val)
-      printf "%d\ttoolchain-jdk-version\t%s\n", NR, val
+    function strip_comments(line,    out, pos, endpos) {
+      out = ""
+      while (length(line) > 0) {
+        if (in_comment) {
+          endpos = index(line, "-->")
+          if (endpos == 0) return out
+          line = substr(line, endpos + 3)
+          in_comment = 0
+        } else {
+          pos = index(line, "<!--")
+          if (pos == 0) return out line
+          out = out substr(line, 1, pos - 1)
+          line = substr(line, pos + 4)
+          in_comment = 1
+        }
+      }
+      return out
+    }
+    {
+      s = strip_comments($0)
+      while (length(s) > 0) {
+        if (open_tag != "") {
+          close_pat = "</" open_tag ">"
+          cpos = index(s, close_pat)
+          if (cpos == 0) {
+            open_val = open_val " " s
+            s = ""
+          } else {
+            open_val = open_val " " substr(s, 1, cpos - 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", open_val)
+            if (open_val ~ /^([0-9]+(\.[0-9]+)?|\$\{[A-Za-z0-9_.]+\})$/) {
+              out_tag = (open_tag == "version") ? "toolchain-jdk-version" : open_tag
+              printf "%d\t%s\t%s\n", open_line, out_tag, open_val
+            }
+            s = substr(s, cpos + length(close_pat))
+            open_tag = ""
+            open_val = ""
+          }
+        } else {
+          if (match(s, /<(jdk|\/jdk|maven\.compiler\.release|maven\.compiler\.source|maven\.compiler\.target|release|source|target|version)([[:space:]][^>]*)?>/)) {
+            token = substr(s, RSTART, RLENGTH)
+            s = substr(s, RSTART + RLENGTH)
+            if (token ~ /\/>$/) {
+              continue
+            }
+            tname = token
+            sub(/^</, "", tname)
+            sub(/([[:space:]].*)?>$/, "", tname)
+            if (tname == "jdk") {
+              in_jdk = 1
+            } else if (tname == "/jdk") {
+              in_jdk = 0
+            } else if (tname == "version" && !in_jdk) {
+              # Ignore plugin <version> outside <jdk> blocks
+            } else {
+              open_tag = tname
+              open_line = NR
+              open_val = ""
+            }
+          } else {
+            s = ""
+          }
+        }
+      }
+    }
+  ' "$file"
+}
+
+# Extract single-tag content (e.g. java.version or packaging) with XML comments stripped.
+extract_uncommented_tag() {
+  local file="$1"
+  local tag_name="$2"
+  awk -v want="$tag_name" '
+    function strip_comments(line,    out, pos, endpos) {
+      out = ""
+      while (length(line) > 0) {
+        if (in_comment) {
+          endpos = index(line, "-->")
+          if (endpos == 0) return out
+          line = substr(line, endpos + 3)
+          in_comment = 0
+        } else {
+          pos = index(line, "<!--")
+          if (pos == 0) return out line
+          out = out substr(line, 1, pos - 1)
+          line = substr(line, pos + 4)
+          in_comment = 1
+        }
+      }
+      return out
+    }
+    {
+      s = strip_comments($0)
+      while (length(s) > 0) {
+        if (open_tag != "") {
+          close_pat = "</" want ">"
+          cpos = index(s, close_pat)
+          if (cpos == 0) {
+            open_val = open_val " " s
+            s = ""
+          } else {
+            open_val = open_val " " substr(s, 1, cpos - 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", open_val)
+            print open_val
+            exit
+          }
+        } else {
+          idx = index(s, "<" want ">")
+          if (idx > 0) {
+            s = substr(s, idx + length(want) + 2)
+            open_tag = want
+            open_val = ""
+          } else {
+            s = ""
+          }
+        }
+      }
     }
   ' "$file"
 }
@@ -172,9 +289,9 @@ for file in "${POM_FILES[@]}"; do
   # java.version itself may be declared directly (not just via compiler.*
   # properties) — pick it up too so a same-file ${java.version} reference
   # resolves correctly regardless of which property actually carries it.
-  java_version_line="$(grep -nE '<java\.version>[[:space:]]*[0-9]+[[:space:]]*</java\.version>' "$file" | head -1 || true)"
-  if [ -n "$java_version_line" ]; then
-    PROPS["java.version"]="$(echo "$java_version_line" | sed -E 's/.*<java\.version>[[:space:]]*([0-9]+).*/\1/')"
+  java_version_val="$(extract_uncommented_tag "$file" "java.version" | head -1 || true)"
+  if [[ "$java_version_val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    PROPS["java.version"]="$java_version_val"
   fi
 
   declare -A SEEN_VALUES=()
@@ -222,7 +339,7 @@ for file in "${POM_FILES[@]}"; do
   # inherit (kooker-parent-build's own pattern) is still fully validated
   # above like any other file.
   if [ "$file_has_declaration" -eq 0 ]; then
-    packaging="$(grep -oE '<packaging>[a-zA-Z-]+</packaging>' "$file" | head -1 | sed -E 's/<[^>]+>//g')"
+    packaging="$(extract_uncommented_tag "$file" "packaging" | head -1 || true)"
     if [ "$packaging" = "pom" ]; then
       FINDINGS+=("skip  $file  packaging=pom aggregator with no declaration of its own — not required to declare a Java version")
     else

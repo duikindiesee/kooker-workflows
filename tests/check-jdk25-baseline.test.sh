@@ -129,6 +129,63 @@ assert_exit    "hybrid repo: silent sibling module fails closed"     1 --root "$
 assert_contains "hybrid repo names the silent module, not the aggregator" "module-b" --root "$FIXTURES/hybrid-absent-module"
 assert_exit    "hybrid repo defers with --allow-absent (exit 2)"     2 --root "$FIXTURES/hybrid-absent-module" --allow-absent
 
+# ── XML comment bypass, multi-line tags, single-line toolchain & CLI checks ─
+EDGE_TMP="$(mktemp -d 2>/dev/null || mktemp -d -t 'jdk25-edge-test.XXXXXX')"
+trap 'rm -rf "$EDGE_TMP"' EXIT
+
+mkdir -p "$EDGE_TMP/commented-25-masking-17"
+cat > "$EDGE_TMP/commented-25-masking-17/pom.xml" <<'XML'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <properties>
+    <!-- <maven.compiler.release>25</maven.compiler.release> -->
+    <source>17</source>
+  </properties>
+</project>
+XML
+assert_exit "commented-out 25 cannot mask real 17" 1 --root "$EDGE_TMP/commented-25-masking-17"
+
+mkdir -p "$EDGE_TMP/commented-25-only"
+cat > "$EDGE_TMP/commented-25-only/pom.xml" <<'XML'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <!--
+    <maven.compiler.release>25</maven.compiler.release>
+    <packaging>pom</packaging>
+  -->
+</project>
+XML
+assert_exit "commented-out 25 and packaging=pom fail closed as absent" 1 --root "$EDGE_TMP/commented-25-only"
+
+mkdir -p "$EDGE_TMP/multiline-tag"
+cat > "$EDGE_TMP/multiline-tag/pom.xml" <<'XML'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <properties>
+    <source>
+      17
+    </source>
+  </properties>
+</project>
+XML
+assert_exit "multi-line <source>17</source> is caught and fails" 1 --root "$EDGE_TMP/multiline-tag"
+assert_contains "multi-line <source>17</source> reports < 25" "source = 17  (< 25)" --root "$EDGE_TMP/multiline-tag"
+
+mkdir -p "$EDGE_TMP/singleline-toolchain"
+cat > "$EDGE_TMP/singleline-toolchain/pom.xml" <<'XML'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <build><plugins><plugin><configuration><toolchains>
+    <jdk><version>17</version></jdk>
+  </toolchains></configuration></plugin></plugins></build>
+</project>
+XML
+assert_exit "single-line <jdk><version>17</version></jdk> is caught and fails" 1 --root "$EDGE_TMP/singleline-toolchain"
+assert_contains "single-line toolchain reports version 17" "toolchain-jdk-version = 17" --root "$EDGE_TMP/singleline-toolchain"
+
+assert_exit "--minimum 0 is rejected" 1 --root "$FIXTURES/equal" --minimum 0
+assert_exit "missing --minimum argument exits 1 cleanly" 1 --root "$FIXTURES/equal" --minimum
+
 echo
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed ==="
 [ "$FAIL_COUNT" -eq 0 ]

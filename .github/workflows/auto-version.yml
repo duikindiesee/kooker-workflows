@@ -3,29 +3,37 @@ name: Auto Version Tag
 # Reusable workflow — tags the repo on merge to main.
 #
 # Version scheme:
-#   has-db-changes=true  → vX.Y.Z.N  (micro bump — 4th part)
-#   has-db-changes=false → vX.Y.Z    (patch bump — 3rd part, resets micro)
+#   has-db-changes=true  -> vX.Y.Z.N  (micro bump — 4th part)
+#   has-db-changes=false -> vX.Y.Z    (patch bump — 3rd part, resets micro)
 #
 # Usage:
-#   uses: duikindiesee/kooker-workflows/.github/workflows/auto-version.yml@main
+#   uses: duikindiesee/kooker-workflows/.github/workflows/auto-version.yml@<commit-sha>
 #   with:
 #     has-db-changes: ${{ needs.flyway-lint.outputs.has_db_changes }}
 #   secrets: inherit
 
 on:
   workflow_call:
+    inputs:
+      has-db-changes:
+        description: "'true' if DB migrations changed (triggers 4-part micro bump vX.Y.Z.N); 'false' for standard patch bump vX.Y.Z."
+        required: false
+        type: string
+        default: 'false'
     outputs:
       version:
         description: "The newly created version tag (e.g. v1.2.3)"
         value: ${{ jobs.tag.outputs.version }}
 
-permissions:
-  contents: write
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   tag:
+    permissions:
+      contents: write
     # Uses the proven kooker1-org self-hosted pool (see org-runner-canary.yml in kooker-infra and
     # maven-version-bump.yml/ghcr-retention.yml/gitops-sync.yml in this repo) -- not the retired
     # [self-hosted, local-linux] label this job was moved off of.
@@ -41,47 +49,92 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Compute next version tag
         id: compute
+        shell: bash
+        env:
+          HAS_DB_CHANGES: ${{ inputs.has-db-changes }}
         run: |
           set -euo pipefail
+          case "${HAS_DB_CHANGES:-false}" in
+            true|false) ;;
+            *)
+              echo "::error::Invalid has-db-changes '$HAS_DB_CHANGES': expected 'true' or 'false'."
+              exit 1
+              ;;
+          esac
 
-          # Latest tag matching vX.Y.Z; default to v0.0.0
-          LATEST=$(git tag --sort=-version:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | head -n1 || true)
-          LATEST=${LATEST:-v0.0.0}
+          # Latest tag matching vX.Y.Z or vX.Y.Z.N; default to v0.0.0
+          LATEST="$(git tag --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+            | head -n1 || true)"
+          LATEST="${LATEST:-v0.0.0}"
           echo "Latest tag: $LATEST"
 
-          # Strip leading 'v', split on '.'
-          RAW=${LATEST#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "${RAW}"
-          MAJOR=${MAJOR:-0}
-          MINOR=${MINOR:-0}
-          PATCH=${PATCH:-0}
+          RAW="${LATEST#v}"
+          IFS='.' read -r MAJOR MINOR PATCH MICRO <<< "${RAW}"
+          MAJOR="${MAJOR:-0}"
+          MINOR="${MINOR:-0}"
+          PATCH="${PATCH:-0}"
+          MICRO="${MICRO:-}"
 
-          # Patch bump: increment Z
-          NEXT="v${MAJOR}.${MINOR}.$((PATCH+1))"
+          if [ "${HAS_DB_CHANGES:-false}" = "true" ]; then
+            if [ -n "$MICRO" ]; then
+              NEXT="v${MAJOR}.${MINOR}.${PATCH}.$((MICRO + 1))"
+            else
+              NEXT="v${MAJOR}.${MINOR}.${PATCH}.1"
+            fi
+          else
+            # Patch bump: increment Z, reset micro
+            NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          if [[ ! "$NEXT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Computed invalid version tag '$NEXT'."
+            exit 1
+          fi
 
           echo "Next version: $NEXT"
-          echo "tag=$NEXT" >> $GITHUB_OUTPUT
+          echo "tag=$NEXT" >> "$GITHUB_OUTPUT"
 
       - name: Create and push tag
+        shell: bash
+        env:
+          TAG: ${{ steps.compute.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.compute.outputs.tag }}"
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Refusing invalid version tag '$TAG'."
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG" -m "Auto-version: $TAG"
-          git push origin "$TAG"
+          git tag -m "Auto-version: $TAG" -- "$TAG"
+          if [ -n "${GH_TOKEN:-}" ]; then
+            ASKPASS_SCRIPT="$(mktemp)"
+            trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+            chmod 700 "$ASKPASS_SCRIPT"
+            cat > "$ASKPASS_SCRIPT" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf 'x-access-token\n' ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          SH
+            GIT_ASKPASS="$ASKPASS_SCRIPT" GIT_TERMINAL_PROMPT=0 git push origin -- "$TAG"
+          else
+            git push origin -- "$TAG"
+          fi
           echo "Tagged: $TAG"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           tag_name: ${{ steps.compute.outputs.tag }}
           name: ${{ steps.compute.outputs.tag }}

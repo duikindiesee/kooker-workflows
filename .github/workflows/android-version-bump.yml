@@ -33,7 +33,7 @@
 # USAGE (in calling workflow)
 #   jobs:
 #     version-bump:
-#       uses: duikindiesee/kooker-workflows/.github/workflows/android-version-bump.yml@main
+#       uses: duikindiesee/kooker-workflows/.github/workflows/android-version-bump.yml@<commit-sha>
 #       with:
 #         app-dir: sportifine          # subdirectory inside the repo
 #       secrets: inherit
@@ -71,8 +71,11 @@ on:
         description: "'true' if a version bump was committed, 'false' otherwise"
         value: ${{ jobs.bump.outputs.bumped }}
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   bump:
     # Uses the proven kooker1-org self-hosted pool (see org-runner-canary.yml in kooker-infra and
@@ -89,69 +92,92 @@ jobs:
 
     steps:
       - name: Checkout (full history for push)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Detect bump type and apply version
         id: bump
+        shell: bash
+        env:
+          APP_DIR: ${{ inputs.app-dir }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          APP_DIR="${APP_DIR%/}"
+          if [ -z "$APP_DIR" ] || [[ ! "$APP_DIR" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$APP_DIR" == /* ]] || [[ "$APP_DIR" == -* ]] || [[ "$APP_DIR" == ~* ]] || [[ "$APP_DIR" =~ (^|/)\.\.(/|$) ]]; then
+            echo "::error::Invalid app-dir '$APP_DIR': must be a clean relative directory path without '..' or leading '-'/'/'."
+            exit 1
+          fi
+
           COMMIT_SUBJECT="$(printf '%s' "${COMMIT_MSG}" | sed -n '1p')"
           BUILD_GRADLE="${APP_DIR}/app/build.gradle"
+          if [ ! -f "$BUILD_GRADLE" ] || [ -L "$BUILD_GRADLE" ]; then
+            echo "::error::Gradle build file missing or symlinked: '${BUILD_GRADLE}'."
+            exit 1
+          fi
 
           printf '=== Commit  : %s\n' "${COMMIT_SUBJECT}"
-          echo "=== App dir : ${APP_DIR}"
-          echo "=== Gradle  : ${BUILD_GRADLE}"
+          printf '=== App dir : %s\n' "${APP_DIR}"
+          printf '=== Gradle  : %s\n' "${BUILD_GRADLE}"
+
+          parse_semver() {
+            local ver="$1"
+            if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid semver versionName '${ver}' in '${BUILD_GRADLE}' (expected MAJOR.MINOR.PATCH)." >&2
+              exit 1
+            fi
+          }
+
+          CURRENT="$(grep -E "^\s+versionName" "$BUILD_GRADLE" | head -n1 | grep -oP "['\"]\K[^'\"]+" || true)"
+          if [ -z "$CURRENT" ]; then
+            echo "ERROR: Could not parse versionName from ${BUILD_GRADLE}" >&2
+            exit 1
+          fi
+          parse_semver "$CURRENT"
+
+          MAJOR="$(printf '%s\n' "$CURRENT" | cut -d. -f1)"
+          MINOR="$(printf '%s\n' "$CURRENT" | cut -d. -f2)"
+          PATCH="$(printf '%s\n' "$CURRENT" | cut -d. -f3)"
 
           # ──────────────────────────────────────────────────────────────────
           # LOOP GUARD
           # If this commit is itself a release bump (pushed by this workflow),
           # skip bumping. The build continues using the already-bumped version.
           # ──────────────────────────────────────────────────────────────────
-          if echo "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
+          if printf '%s\n' "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
             echo "Release commit detected — skipping bump to prevent infinite loop."
-            CURRENT=$(grep -E "^\s+versionName" "$BUILD_GRADLE" | grep -oP "['\"]\K[^'\"]+")
-            MAJOR=$(echo $CURRENT | cut -d. -f1)
-            MINOR=$(echo $CURRENT | cut -d. -f2)
-            PATCH=$(echo $CURRENT | cut -d. -f3)
-            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
-            echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))" >> $GITHUB_OUTPUT
-            echo "bumped=false" >> $GITHUB_OUTPUT
+            {
+              echo "new-version=${CURRENT}"
+              echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))"
+              echo "bumped=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # ──────────────────────────────────────────────────────────────────
-          # READ CURRENT VERSION
-          # Handles both single and double quotes around the versionName value.
-          # ──────────────────────────────────────────────────────────────────
-          CURRENT=$(grep -E "^\s+versionName" "$BUILD_GRADLE" | grep -oP "['\"]\K[^'\"]+")
-          if [ -z "$CURRENT" ]; then
-            echo "ERROR: Could not parse versionName from ${BUILD_GRADLE}" >&2
-            exit 1
-          fi
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
           echo "Current: ${CURRENT}  (versionCode: $(( MAJOR * 100 + MINOR * 10 + PATCH )))"
 
           # ──────────────────────────────────────────────────────────────────
           # DETERMINE BUMP TYPE from Conventional Commit prefix
           # ──────────────────────────────────────────────────────────────────
           BUMP_TYPE="none"
-          if echo "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
+          if printf '%s\n' "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
             BUMP_TYPE="major"
-          elif echo "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
+          elif printf '%s\n' "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
             BUMP_TYPE="minor"
-          elif echo "$COMMIT_MSG" | grep -qE "^fix(\([^)]+\))?:"; then
+          elif printf '%s\n' "$COMMIT_MSG" | grep -qE "^fix(\([^)]+\))?:"; then
             BUMP_TYPE="patch"
           fi
 
           if [ "$BUMP_TYPE" = "none" ]; then
             echo "No version bump for prefix: ${COMMIT_SUBJECT}"
-            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
-            echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))" >> $GITHUB_OUTPUT
-            echo "bumped=false" >> $GITHUB_OUTPUT
+            {
+              echo "new-version=${CURRENT}"
+              echo "new-version-code=$(( MAJOR * 100 + MINOR * 10 + PATCH ))"
+              echo "bumped=false"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -169,11 +195,17 @@ jobs:
           echo "New: ${NEW_VERSION}  (versionCode: ${NEW_CODE})  bump: ${BUMP_TYPE}"
 
           # ──────────────────────────────────────────────────────────────────
-          # WRITE NEW VERSION into build.gradle
+          # WRITE NEW VERSION into build.gradle (supports single and double quotes)
           # Only touches versionName and versionCode lines; preserves everything else.
           # ──────────────────────────────────────────────────────────────────
-          sed -i "s/versionName '[^']*'/versionName '${NEW_VERSION}'/" "$BUILD_GRADLE"
-          sed -i "s/versionCode [0-9]*/versionCode ${NEW_CODE}/" "$BUILD_GRADLE"
+          sed -i -E "s/(versionName[[:space:]]+)['\"][^'\"]*['\"]/\1'${NEW_VERSION}'/" "$BUILD_GRADLE"
+          sed -i -E "s/(versionCode[[:space:]]+)[0-9]+/\1${NEW_CODE}/" "$BUILD_GRADLE"
+
+          UPDATED_NAME="$(grep -E "^\s+versionName" "$BUILD_GRADLE" | head -n1 | grep -oP "['\"]\K[^'\"]+" || true)"
+          if [ "$UPDATED_NAME" != "$NEW_VERSION" ]; then
+            echo "::error::Failed to update versionName to '${NEW_VERSION}' in '${BUILD_GRADLE}'."
+            exit 1
+          fi
 
           # ──────────────────────────────────────────────────────────────────
           # COMMIT AND PUSH
@@ -181,13 +213,26 @@ jobs:
           # ──────────────────────────────────────────────────────────────────
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${APP_DIR}/app/build.gradle"
-          git commit -m "chore(release): bump ${APP_DIR} to ${NEW_VERSION}"
-          git push
+          git add -- "$BUILD_GRADLE"
+          git commit --only -m "chore(release): bump ${APP_DIR} to ${NEW_VERSION}" -- "$BUILD_GRADLE"
+          if [ -n "${GH_TOKEN:-}" ]; then
+            ASKPASS_SCRIPT="$(mktemp)"
+            trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+            chmod 700 "$ASKPASS_SCRIPT"
+            cat > "$ASKPASS_SCRIPT" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf 'x-access-token\n' ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          SH
+            GIT_ASKPASS="$ASKPASS_SCRIPT" GIT_TERMINAL_PROMPT=0 git push
+          else
+            git push
+          fi
 
-          echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "new-version-code=${NEW_CODE}" >> $GITHUB_OUTPUT
-          echo "bumped=true" >> $GITHUB_OUTPUT
-        env:
-          APP_DIR: ${{ inputs.app-dir }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          {
+            echo "new-version=${NEW_VERSION}"
+            echo "new-version-code=${NEW_CODE}"
+            echo "bumped=true"
+          } >> "$GITHUB_OUTPUT"

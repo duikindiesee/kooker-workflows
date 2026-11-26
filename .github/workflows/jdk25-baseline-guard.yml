@@ -25,7 +25,7 @@
 # USAGE (in a consuming repo's workflow, BEFORE the build/package job)
 #   jobs:
 #     jdk25-guard:
-#       uses: duikindiesee/kooker-workflows/.github/workflows/jdk25-baseline-guard.yml@main
+#       uses: duikindiesee/kooker-workflows/.github/workflows/jdk25-baseline-guard.yml@<commit-sha>
 #
 #     build:
 #       needs: jdk25-guard
@@ -48,32 +48,58 @@ on:
         type: string
         default: '25'
       workflows-ref:
-        description: "kooker-workflows ref to source scripts/check-jdk25-baseline.sh from."
+        description: "kooker-workflows ref to source scripts/check-jdk25-baseline.sh from (defaults to the reusable workflow's own commit SHA)."
         required: false
         type: string
-        default: main
+        default: ''
     outputs:
       result:
         description: "'pass' or 'fail'"
         value: ${{ jobs.guard.outputs.result }}
+
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   guard:
+    permissions:
+      contents: read
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     outputs:
       result: ${{ steps.verdict.outputs.result }}
     steps:
+      - name: Validate workflow inputs
+        shell: bash
+        env:
+          MINIMUM_JAVA_VERSION: ${{ inputs.minimum-java-version }}
+          WORKFLOWS_REF: ${{ inputs.workflows-ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$MINIMUM_JAVA_VERSION" =~ ^[1-9][0-9]*$ ]] || [ "$MINIMUM_JAVA_VERSION" -lt 25 ]; then
+            echo "::error::minimum-java-version must be an integer >= 25, got '$MINIMUM_JAVA_VERSION'."
+            exit 1
+          fi
+          if [ -n "$WORKFLOWS_REF" ]; then
+            if [[ ! "$WORKFLOWS_REF" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$WORKFLOWS_REF" == -* ]] || [[ "$WORKFLOWS_REF" == /* ]] || [[ "$WORKFLOWS_REF" == *".."* ]]; then
+              echo "::error::Invalid workflows-ref '$WORKFLOWS_REF'."
+              exit 1
+            fi
+          fi
+          echo "Validated minimum-java-version=$MINIMUM_JAVA_VERSION"
+
       - name: Checkout calling repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Fetch the shared guard script from kooker-workflows
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: duikindiesee/kooker-workflows
-          ref: ${{ inputs.workflows-ref }}
+          ref: ${{ inputs.workflows-ref != '' && inputs.workflows-ref || github.workflow_sha }}
+          persist-credentials: false
           path: .kooker-workflows-guard
           sparse-checkout: |
             scripts/check-jdk25-baseline.sh
@@ -81,25 +107,33 @@ jobs:
 
       - name: Layer 1 — static scan of committed POM/toolchain declarations
         id: static
+        shell: bash
+        env:
+          MINIMUM_JAVA_VERSION: ${{ inputs.minimum-java-version }}
         run: |
+          set -euo pipefail
+          if [[ ! "$MINIMUM_JAVA_VERSION" =~ ^[1-9][0-9]*$ ]] || [ "$MINIMUM_JAVA_VERSION" -lt 25 ]; then
+            echo "::error::minimum-java-version must be an integer >= 25, got '$MINIMUM_JAVA_VERSION'."
+            exit 1
+          fi
           set +e
           chmod +x .kooker-workflows-guard/scripts/check-jdk25-baseline.sh
           .kooker-workflows-guard/scripts/check-jdk25-baseline.sh \
             --root . \
-            --minimum "${{ inputs.minimum-java-version }}" \
+            --minimum "$MINIMUM_JAVA_VERSION" \
             --allow-absent
           code=$?
           set -e
           echo "exit-code=${code}" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 1 ]; then
-            echo "::error::JDK ${{ inputs.minimum-java-version }} baseline guard: a committed pom.xml/toolchains.xml declares a Java version below ${{ inputs.minimum-java-version }}, or its declarations conflict. See the [jdk25-guard] findings above."
+            echo "::error::JDK ${MINIMUM_JAVA_VERSION} baseline guard: a committed pom.xml/toolchains.xml declares a Java version below ${MINIMUM_JAVA_VERSION}, or its declarations conflict. See the [jdk25-guard] findings above."
           elif [ "$code" -eq 2 ]; then
-            echo "::notice::JDK ${{ inputs.minimum-java-version }} baseline guard: no project file declares its own Java version — checking the effective (parent-inherited) configuration next."
+            echo "::notice::JDK ${MINIMUM_JAVA_VERSION} baseline guard: no project file declares its own Java version — checking the effective (parent-inherited) configuration next."
           fi
 
-      - name: Set up JDK ${{ inputs.minimum-java-version }} for the effective-configuration cross-check
+      - name: Set up JDK for the effective-configuration cross-check
         if: steps.static.outputs.exit-code == '2'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: ${{ inputs.minimum-java-version }}
           distribution: temurin
@@ -109,20 +143,26 @@ jobs:
           server-password: GITHUB_TOKEN
         env:
           GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN || github.token }}
 
       - name: Layer 2 — effective-configuration cross-check (parent-POM inheritance)
         id: effective
         if: steps.static.outputs.exit-code == '2'
+        shell: bash
+        env:
+          MINIMUM: ${{ inputs.minimum-java-version }}
         run: |
+          set -euo pipefail
+          if [[ ! "$MINIMUM" =~ ^[1-9][0-9]*$ ]] || [ "$MINIMUM" -lt 25 ]; then
+            echo "::error::minimum-java-version must be an integer >= 25, got '$MINIMUM'."
+            exit 1
+          fi
           set +e
-          MINIMUM="${{ inputs.minimum-java-version }}"
           FAIL=0
 
-          # Only re-examine files the static scan found nothing in — a file that
-          # already declared something was already decisively judged by Layer 1.
-          while IFS= read -r pom; do
-            dir="$(dirname "$pom")"
+          # Re-examine POM files, skipping pure packaging=pom aggregators without
+          # parent POMs that Layer 1 already exempted.
+          while IFS= read -r -d '' pom; do
             val=""
             for expr in maven.compiler.release maven.compiler.target maven.compiler.source; do
               raw="$(mvn -q -f "$pom" help:evaluate -Dexpression="$expr" -DforceStdout 2>/dev/null | tail -1)"
@@ -139,6 +179,10 @@ jobs:
             done
 
             if [ -z "$val" ]; then
+              if grep -qE '<packaging>[[:space:]]*pom[[:space:]]*</packaging>' "$pom"; then
+                echo "[jdk25-guard] skip  ${pom}  packaging=pom aggregator resolves no compiler version"
+                continue
+              fi
               echo "::error file=${pom}::JDK ${MINIMUM} baseline guard: ${pom} declares no Java version of its own AND Maven's effective configuration (including any parent POM) resolves to nothing. Fail-closed: an in-scope Maven project must have a resolvable Java baseline."
               FAIL=1
               continue
@@ -151,7 +195,7 @@ jobs:
             fi
           done < <(find . \
             \( -path '*/target/*' -o -path '*/.git/*' -o -path '*/.kooker-workflows-guard/*' -o -path '*/node_modules/*' \) -prune -o \
-            -name 'pom.xml' -type f -print)
+            -name 'pom.xml' -type f -print0)
 
           echo "exit-code=${FAIL}" >> "$GITHUB_OUTPUT"
           set -e
@@ -159,13 +203,17 @@ jobs:
 
       - name: Final verdict
         id: verdict
+        shell: bash
+        env:
+          STATIC_CODE: ${{ steps.static.outputs.exit-code }}
+          EFFECTIVE_CODE: ${{ steps.effective.outputs.exit-code }}
+          MINIMUM_JAVA_VERSION: ${{ inputs.minimum-java-version }}
         run: |
-          static_code="${{ steps.static.outputs.exit-code }}"
-          effective_code="${{ steps.effective.outputs.exit-code }}"
-          if [ "$static_code" = "1" ] || [ "$effective_code" = "1" ]; then
+          set -euo pipefail
+          if [ "$STATIC_CODE" = "1" ] || [ "$EFFECTIVE_CODE" = "1" ]; then
             echo "result=fail" >> "$GITHUB_OUTPUT"
-            echo "::error::JDK ${{ inputs.minimum-java-version }} baseline guard FAILED — see findings above. Build/package steps must not run."
+            echo "::error::JDK ${MINIMUM_JAVA_VERSION} baseline guard FAILED — see findings above. Build/package steps must not run."
             exit 1
           fi
           echo "result=pass" >> "$GITHUB_OUTPUT"
-          echo "[jdk25-guard] PASS — every in-scope Maven project is on Java ${{ inputs.minimum-java-version }} or above."
+          echo "[jdk25-guard] PASS — every in-scope Maven project is on Java ${MINIMUM_JAVA_VERSION} or above."
