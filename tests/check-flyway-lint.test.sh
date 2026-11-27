@@ -4,6 +4,7 @@
 # and scripts/lint-migrations.sh
 # =============================================================================
 set -euo pipefail
+unset GITHUB_BASE_REF GITHUB_HEAD_REF GITHUB_EVENT_NAME GITHUB_REF GITHUB_SHA GITHUB_BASE_SHA
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -70,7 +71,7 @@ for bad_path in \
   '/abs/path' \
   '-flag'; do
   assert_exit "detect rejects invalid MIGRATION_PATH ($bad_path)" 1 \
-    bash -c 'cd "$1" && MIGRATION_PATH="$2" GITHUB_OUTPUT="$3" GITHUB_ENV="$4" bash "$5"' _ \
+    bash -c 'cd "$1" && env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF -u GITHUB_EVENT_NAME -u GITHUB_REF -u GITHUB_SHA -u GITHUB_BASE_SHA MIGRATION_PATH="$2" GITHUB_OUTPUT="$3" GITHUB_ENV="$4" bash "$5"' _ \
       "$R_INJ" "$bad_path" "$TMP/out.txt" "$TMP/env.txt" "$DETECT_SH"
   assert_exit "naming rejects invalid MIGRATION_PATH ($bad_path)" 1 \
     bash -c 'cd "$1" && MIGRATION_PATH="$2" bash "$3"' _ "$R_INJ" "$bad_path" "$NAMING_SH"
@@ -102,7 +103,7 @@ GH_OUT="$TMP/nolf_out.txt"
 GH_ENV="$TMP/nolf_env.txt"
 : > "$GH_OUT"
 : > "$GH_ENV"
-(cd "$R_NO_LF" && MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$GH_OUT" GITHUB_ENV="$GH_ENV" bash "$DETECT_SH")
+(cd "$R_NO_LF" && env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF -u GITHUB_EVENT_NAME -u GITHUB_REF -u GITHUB_SHA -u GITHUB_BASE_SHA MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$GH_OUT" GITHUB_ENV="$GH_ENV" bash "$DETECT_SH")
 if ! grep -q '^has_db_changes=true$' "$GH_OUT"; then
   echo "FAIL: detect did not output has_db_changes=true" >&2
   exit 1
@@ -158,7 +159,7 @@ SQL
 )
 : > "$GH_OUT"
 : > "$GH_ENV"
-(cd "$R_CLEAN" && MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$GH_OUT" GITHUB_ENV="$GH_ENV" bash "$DETECT_SH")
+(cd "$R_CLEAN" && env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF -u GITHUB_EVENT_NAME -u GITHUB_REF -u GITHUB_SHA -u GITHUB_BASE_SHA MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$GH_OUT" GITHUB_ENV="$GH_ENV" bash "$DETECT_SH")
 CHANGED_CLEAN="$(awk 'NR==1{ sub(/^CHANGED_FILES<</,""); d=$0; next } $0==d{ exit } { print }' "$GH_ENV")"
 assert_exit "additive SQL with /* DROP TABLE */ block comment passes" 0 \
   bash -c 'cd "$1" && CHANGED_FILES="$2" bash "$3"' _ "$R_CLEAN" "$CHANGED_CLEAN" "$BREAKING_SH"
@@ -240,6 +241,46 @@ assert_exit "second module unsafe application-migrator.yaml fails closed" 1 \
 sed -i 's/enabled: true/enabled: false/' "$R_MODS/mod-b/src/main/resources/application-migrator.yaml"
 assert_exit "all safe application-migrator.y*ml pass" 0 \
   bash -c 'cd "$1" && PATH="$2:$PATH" bash "$3"' _ "$R_MODS" "$BIN_DIR" "$MIGRATOR_SH"
+
+echo "=== 5. PR-mode GITHUB_BASE_REF controls ==="
+assert_exit "PR-mode fails closed when origin/GITHUB_BASE_REF is missing" 1 \
+  bash -c 'cd "$1" && GITHUB_BASE_REF="nonexistent-base" MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$2" GITHUB_ENV="$3" bash "$4"' _ \
+    "$R_CLEAN" "$TMP/pr_neg_out.txt" "$TMP/pr_neg_env.txt" "$DETECT_SH"
+
+R_PR_REMOTE="$TMP/remote-pr.git"
+R_PR="$TMP/repo-pr"
+git init --bare -q "$R_PR_REMOTE"
+mkdir -p "$R_PR/src/main/resources/db/migration"
+(
+  cd "$R_PR"
+  git init -q
+  git config user.name T
+  git config user.email t@example.invalid
+  printf 'CREATE TABLE t (id INT);\n' > src/main/resources/db/migration/V1__init.sql
+  git add .
+  git commit -qm init
+  git branch -M devmain
+  git remote add origin "$R_PR_REMOTE"
+  git push -q origin devmain
+  git checkout -qb feature/add-note
+  printf 'ALTER TABLE t ADD COLUMN note TEXT;\n' > src/main/resources/db/migration/V2__add_note.sql
+  git add .
+  git commit -qm addnote
+)
+PR_OUT="$TMP/pr_pos_out.txt"
+PR_ENV="$TMP/pr_pos_env.txt"
+: > "$PR_OUT"
+: > "$PR_ENV"
+assert_exit "PR-mode with synthetic origin/devmain exits 0" 0 \
+  bash -c 'cd "$1" && GITHUB_BASE_REF="devmain" MIGRATION_PATH="src/main/resources/db/migration" GITHUB_OUTPUT="$2" GITHUB_ENV="$3" bash "$4"' _ \
+    "$R_PR" "$PR_OUT" "$PR_ENV" "$DETECT_SH"
+if grep -q '^has_db_changes=true$' "$PR_OUT"; then
+  echo "PASS  PR-mode outputs has_db_changes=true for origin/devmain diff"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL  PR-mode did not output has_db_changes=true" >&2
+  FAIL=$((FAIL + 1))
+fi
 
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

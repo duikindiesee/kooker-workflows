@@ -145,5 +145,8 @@ jobs:
           if command -v actionlint >/dev/null 2>&1; then
             actionlint
           else
-            docker run --rm -v "${GITHUB_WORKSPACE}:/repo" -w /repo rhysd/actionlint:1.7.7
+            cid="$(docker create -w /tmp rhysd/actionlint:1.7.7)"
+            trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+            docker cp "${GITHUB_WORKSPACE}/.github" "$cid:/tmp/"
+            docker start -a "$cid"
           fi
