@@ -65,7 +65,7 @@ Every other non-archived, non-fork repository in `duikindiesee` was checked and 
 config, or documentation repositories. Listed for a complete, auditable inventory (the task's
 "exact repository inventory" requirement), not because any action is needed:
 
-`boboti`, `citylife`, `discussions`, `irwin_memory_bank`, `joekookerbot`, `kooker-agent-blueprints`,
+`boboti`, `citylife`, `discussions`, `[redacted-memory-bank]`, `joekookerbot`, `kooker-agent-blueprints`,
 `kooker-ai-cortex`, `kooker-api-specs`, `kooker-architecture`, `kooker-bot-constitution`,
 `kooker-bot-spawner`, `kooker-dev-config`, `kooker-documentation`, `kooker-infra`, `kooker-jbird`,
 `kooker-llm-poc`, `kooker-local-sh-infrastructure-old`, `kooker-product-docs`,

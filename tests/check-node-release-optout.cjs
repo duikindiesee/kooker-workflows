@@ -28,6 +28,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
 
 // Pinned official dependencies located in tests/node_modules
@@ -35,7 +36,7 @@ const yaml = require(path.resolve(__dirname, 'node_modules/yaml'));
 
 async function main() {
   // Dynamically import ESM @actions/expressions
-  const expressionsModule = await import(path.resolve(__dirname, 'node_modules/@actions/expressions/dist/index.js'));
+  const expressionsModule = await import(pathToFileURL(path.resolve(__dirname, 'node_modules/@actions/expressions/dist/index.js')).href);
   const { Lexer, Parser, Evaluator, data } = expressionsModule;
 
   function runVerification(yamlString) {
@@ -103,9 +104,11 @@ async function main() {
       throw new Error('MISSING_IF: Step "Create GitHub Release" missing if-condition');
     }
 
-    // Verify guarded script body
-    assert.match(releaseStep.run, /gh release view "v\$\{\{ steps\.bump\.outputs\.new-version \}\}"/);
-    assert.match(releaseStep.run, /gh release create "v\$\{\{ steps\.bump\.outputs\.new-version \}\}"/);
+    // Verify guarded script body uses env:-bound NEW_VERSION (no inline ${{ }} injection)
+    assert.ok(releaseStep.env && releaseStep.env.NEW_VERSION === '${{ steps.bump.outputs.new-version }}', 'NEW_VERSION must be bound via env:');
+    assert.ok(!releaseStep.run.includes('${{'), 'Create GitHub Release run: must not contain inline ${{ }} expressions');
+    assert.match(releaseStep.run, /gh release view "v\$\{NEW_VERSION\}"/);
+    assert.match(releaseStep.run, /gh release create "v\$\{NEW_VERSION\}"/);
 
     // 3. Official @actions/expressions Lex, Parse, and AST check
     const rawIf = releaseStep.if.trim();

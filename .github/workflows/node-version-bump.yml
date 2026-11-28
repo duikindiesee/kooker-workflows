@@ -1,10 +1,9 @@
 # =============================================================================
-# node-version-bump.yml  (v1.5.7)
+# node-version-bump.yml  (v1.5.8)
 # =============================================================================
 # PURPOSE
 #   Reusable workflow that automatically bumps the npm package.json version on
 #   every merge to main. Used by all Node/frontend services:
-#     - kooker-pacman
 #     - kooker-web
 #     - sportifine-v2
 #     - kooker-api-specs
@@ -37,7 +36,7 @@
 #   jobs:
 #     version-bump:
 #       if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-#       uses: duikindiesee/kooker-workflows/.github/workflows/node-version-bump.yml@main
+#       uses: duikindiesee/kooker-workflows/.github/workflows/node-version-bump.yml@<commit-sha>
 #       secrets: inherit
 #
 #     build-and-push:
@@ -46,6 +45,8 @@
 #
 # REQUIRED SECRETS
 #   GITHUB_TOKEN — standard token with contents: write, pull-requests: write
+#   MAVEN_PUBLISH_TOKEN — PAT used to open the bump PR so CI runs on it
+#   GITOPS_APPROVER_TOKEN — separate reviewer identity for PR approval
 # =============================================================================
 
 name: Node Version Bump (Conventional Commits)
@@ -66,8 +67,11 @@ on:
         description: "'true' if a version bump PR was created, 'false' otherwise"
         value: ${{ jobs.bump.outputs.bumped }}
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   bump:
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
@@ -81,54 +85,61 @@ jobs:
 
     steps:
       - name: Checkout (full history for push)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-          # GITHUB_TOKEN is fine for checkout. The branch push that needs the PAT
-          # happens in the create-pull-request step below, which uses
-          # MAVEN_PUBLISH_TOKEN so the bump PR triggers downstream CI.
-          # NOTE: MAVEN_PUBLISH_TOKEN must be a non-expired PAT with repo+workflow
-          # scope (the "Maven package publish" PAT) or the PR push fails on cloud
-          # runners with "could not read Username". The old self-hosted runners
-          # masked an expired token via ambient host git credentials.
+          persist-credentials: false
+          # MAVEN_PUBLISH_TOKEN is used in create-pull-request below so the bump PR
+          # triggers downstream CI. GITOPS_APPROVER_TOKEN approves it separately.
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
       - name: Detect bump type and write version to package.json
         id: bump
+        shell: bash
         run: |
           set -euo pipefail
           COMMIT_SUBJECT="$(printf '%s' "${COMMIT_MSG}" | sed -n '1p')"
           printf '=== Commit: %s\n' "${COMMIT_SUBJECT}"
+
+          validate_semver() {
+            local ver="$1"
+            if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: Invalid package.json version '${ver}' (expected MAJOR.MINOR.PATCH)" >&2
+              exit 1
+            fi
+          }
 
           # ──────────────────────────────────────────────────────────────────
           # LOOP GUARD
           # If this commit is a release bump PR merge, skip bumping entirely.
           # The build job will still run with the bumped version on main.
           # ──────────────────────────────────────────────────────────────────
-          if echo "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
+          if printf '%s\n' "$COMMIT_MSG" | grep -qE "^chore\(release\):"; then
             echo "Release commit detected — skipping bump to prevent infinite loop."
-            CURRENT=$(node -p "require('./package.json').version")
-            echo "new-version=${CURRENT}" >> $GITHUB_OUTPUT
-            echo "bumped=false" >> $GITHUB_OUTPUT
+            CURRENT="$(node -p "require('./package.json').version")"
+            validate_semver "$CURRENT"
+            echo "new-version=${CURRENT}" >> "$GITHUB_OUTPUT"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # ──────────────────────────────────────────────────────────────────
           # READ CURRENT VERSION from package.json
           # ──────────────────────────────────────────────────────────────────
-          CURRENT=$(node -p "require('./package.json').version")
+          CURRENT="$(node -p "require('./package.json').version")"
           if [ -z "$CURRENT" ]; then
             echo "ERROR: Could not read version from package.json" >&2
             exit 1
           fi
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
+          validate_semver "$CURRENT"
+          MAJOR="$(printf '%s\n' "$CURRENT" | cut -d. -f1)"
+          MINOR="$(printf '%s\n' "$CURRENT" | cut -d. -f2)"
+          PATCH="$(printf '%s\n' "$CURRENT" | cut -d. -f3)"
           echo "Current version: ${CURRENT}"
 
           # ──────────────────────────────────────────────────────────────────
@@ -136,9 +147,9 @@ jobs:
           # Default to PATCH for any non-release merge (every merge bumps).
           # ──────────────────────────────────────────────────────────────────
           BUMP_TYPE="patch"
-          if echo "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
+          if printf '%s\n' "$COMMIT_MSG" | grep -qiE "(^feat!|^feat\([^)]+\)!|BREAKING CHANGE)"; then
             BUMP_TYPE="major"
-          elif echo "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
+          elif printf '%s\n' "$COMMIT_MSG" | grep -qE "^feat(\([^)]+\))?:"; then
             BUMP_TYPE="minor"
           fi
 
@@ -156,11 +167,6 @@ jobs:
 
           # ──────────────────────────────────────────────────────────────────
           # SKIP ALREADY-CUT VERSIONS (self-heal from version drift)
-          # A bump PR can stall on failing CI, leaving package.json behind while
-          # its release tag was already created eagerly below. Without this guard
-          # every later merge recomputes the SAME version and "gh release create"
-          # fails on the existing tag, jamming the whole pipeline (the 0.17.0 and
-          # 0.22.6 incidents). Advance the patch until the version tag is free.
           # ──────────────────────────────────────────────────────────────────
           git fetch --tags --force --quiet || true
           while git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null 2>&1; do
@@ -177,8 +183,7 @@ jobs:
 
           # ──────────────────────────────────────────────────────────────────
           # A release bump must not rewrite reviewed source or immutable fixtures.
-          # npm version updates package metadata; any other tracked/untracked
-          # path means this bump is unsafe to publish, even if a hook made it.
+          # ──────────────────────────────────────────────────────────────────
           if ! git diff --quiet HEAD -- . ':(exclude)package.json' ':(exclude)package-lock.json' ||
              [ -n "$(git ls-files --others --exclude-standard)" ]; then
             echo "::error::Version bump changed a non-package path; refusing the release commit."
@@ -201,16 +206,9 @@ jobs:
             git add -- package-lock.json
             PACKAGE_PATHS+=(package-lock.json)
           fi
-          # Keep the commit pathspec narrow even if a pre-commit hook stages
-          # another tracked path after the earlier workspace check. Git hooks
-          # can still add to Git's temporary index, so verify the result below.
           PRE_BUMP_HEAD="$(git rev-parse HEAD)"
           git commit --only -m "chore(release): bump to ${NEW_VERSION}" -- "${PACKAGE_PATHS[@]}"
 
-          # Verify the actual commit and post-hook worktree BEFORE reporting
-          # success to create-pull-request / auto-merge / release steps. If a
-          # hook expanded the commit, restore only this disposable job's HEAD;
-          # leave the changed index/worktree for diagnosis, never publish it.
           abort_bump_commit() {
             git reset --soft "$PRE_BUMP_HEAD"
             exit 1
@@ -236,25 +234,20 @@ jobs:
             abort_bump_commit
           fi
 
-          echo "new-version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "bumped=true" >> $GITHUB_OUTPUT
+          echo "new-version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # ────────────────────────────────────────────────────────────────────────
       # CREATE PR for the bump commit (branch-protection compatible)
-      # The PR auto-merges once quality checks pass → second pipeline run →
-      # loop guard skips bump → Docker build runs with new version.
       # ────────────────────────────────────────────────────────────────────────
       - name: Create version-bump pull request
         id: create-pr
         if: steps.bump.outputs.bumped == 'true'
-        uses: peter-evans/create-pull-request@v8
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8
         with:
-          # MUST use a PAT here — GITHUB_TOKEN commits do NOT trigger workflow
-          # runs on the created branch (GitHub loop-prevention). Without CI running
-          # on the bump PR, auto-merge can never fire.
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
           branch: "chore/bump-${{ steps.bump.outputs.new-version }}"
           title: "chore(release): bump to ${{ steps.bump.outputs.new-version }}"
@@ -266,61 +259,72 @@ jobs:
           labels: "automated,version-bump"
           delete-branch: true
 
-
       - name: Enable auto-merge on bump PR
         if: steps.create-pr.outputs.pull-request-number != ''
+        shell: bash
         run: |
-          OUTPUT=$(gh pr merge "${{ steps.create-pr.outputs.pull-request-number }}" \
+          set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid PR number '$PR_NUMBER'."
+            exit 1
+          fi
+          set +e
+          OUTPUT=$(gh pr merge "$PR_NUMBER" \
             --auto --squash \
-            --repo "${GITHUB_REPOSITORY}" 2>&1) && {
-            echo "Auto-merge enabled on PR #${{ steps.create-pr.outputs.pull-request-number }}"
-          } || {
-            if echo "$OUTPUT" | grep -q "Protected branch rules not configured"; then
-              echo "::warning::Auto-merge skipped — no branch protection rules configured. Bump PR must be merged manually."
-            else
-              echo "::error::Auto-merge failed unexpectedly: $OUTPUT"
-              exit 1
-            fi
-          }
+            --repo "${GITHUB_REPOSITORY}" 2>&1)
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo "Auto-merge enabled on PR #${PR_NUMBER}"
+          elif printf '%s\n' "$OUTPUT" | grep -q "Protected branch rules not configured"; then
+            echo "::warning::Auto-merge skipped — no branch protection rules configured. Bump PR must be merged manually."
+          else
+            echo "::error::Auto-merge failed unexpectedly: $OUTPUT"
+            exit 1
+          fi
         env:
           # Reuse the existing PR-author token so merged pushes can trigger CI.
           # Separate approval and branch protection remain unchanged.
           GH_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
 
-      # ──────────────────────────────────────────────────────────────────────
-      # APPROVE the bump PR with a SEPARATE identity so the armed auto-merge can
-      # complete under the main branch ruleset (which requires one non-author
-      # approval). Without this the bump PR stalls REVIEW_REQUIRED, package.json
-      # never advances, and every later merge recomputes a new version, so the
-      # bumps pile up and consecutive ones conflict. The PR is authored by
-      # MAVEN_PUBLISH_TOKEN; GITOPS_APPROVER_TOKEN is a different account, so its
-      # review satisfies the rule. Mirrors the maven twin (#47) and gitops-sync.
-      # ──────────────────────────────────────────────────────────────────────
       - name: Approve bump PR (separate approver identity)
         if: steps.create-pr.outputs.pull-request-number != ''
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITOPS_APPROVER_TOKEN }}
+          PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::GITOPS_APPROVER_TOKEN is not set. Bump PR #${{ steps.create-pr.outputs.pull-request-number }} opened but cannot be approved; it will stall under branch protection and the bumps will pile up."
+          set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Invalid PR number '$PR_NUMBER'."
             exit 1
           fi
-          gh pr review "${{ steps.create-pr.outputs.pull-request-number }}" \
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GITOPS_APPROVER_TOKEN is not set. Bump PR #${PR_NUMBER} opened but cannot be approved; it will stall under branch protection and the bumps will pile up."
+            exit 1
+          fi
+          gh pr review "$PR_NUMBER" \
             --approve \
             --repo "${GITHUB_REPOSITORY}" \
             --body "Automated version bump. Approved by the separate approver identity so the armed auto-merge can complete under branch protection."
 
       - name: Create GitHub Release
         if: steps.bump.outputs.bumped == 'true' && inputs.create-release
-        run: |
-          # Idempotent: the skip-existing-tags guard above already resolves a free
-          # version, but re-check here so a rare race never fails the release step.
-          if gh release view "v${{ steps.bump.outputs.new-version }}" >/dev/null 2>&1; then
-            echo "::warning::Release v${{ steps.bump.outputs.new-version }} already exists; skipping creation."
-          else
-            gh release create "v${{ steps.bump.outputs.new-version }}" \
-              --title "Release v${{ steps.bump.outputs.new-version }}" \
-              --generate-notes
-          fi
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.bump.outputs.new-version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$NEW_VERSION'."
+            exit 1
+          fi
+          if gh release view "v${NEW_VERSION}" >/dev/null 2>&1; then
+            echo "::warning::Release v${NEW_VERSION} already exists; skipping creation."
+          else
+            gh release create "v${NEW_VERSION}" \
+              --title "Release v${NEW_VERSION}" \
+              --generate-notes
+          fi

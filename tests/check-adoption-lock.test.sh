@@ -268,7 +268,7 @@ run_workflow_merge() {
     cd "$work_dir"
     KUSTOMIZE_PATH="$kustomize_path" \
     GH_TOKEN="mock_token" \
-    PR_URL="https://github.com/duikindiesee/kooker-infra/pull/999" \
+    PR_URL="https://github.example.invalid/duikindiesee/kooker-infra/pull/999" \
     bash "$WORKFLOW_MERGE_SCRIPT"
   )
 }
@@ -320,7 +320,7 @@ assert_exit "script: unrelated overlay exits 0" 0 \
 assert_exit "script: unrelated overlay with ./ exits 0" 0 \
   run_guard_script --infra-dir "infra" --kustomize-path "./manifests/overlays/develop/kooker-web" --image-name "ghcr.io/duikindiesee/kooker-web" --new-tag "0.125.0"
 
-# 4b. Standalone CLI: unavailable infra dir fails closed (MoJoJo finding reproduction)
+# 4b. Standalone CLI: unavailable infra dir fails closed (missing infra dir regression)
 assert_exit "script: unavailable infra dir fails closed (exit 1)" 1 \
   run_guard_script --infra-dir "/not/available" --kustomize-path "./manifests/overlays/develop/citylife" --image-name "ghcr.io/duikindiesee/citylife" --new-tag "0.61.0"
 

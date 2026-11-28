@@ -7,7 +7,7 @@ name: Neo4j Delta Cache
 # Usage:
 #   jobs:
 #     neo4j-cache:
-#       uses: duikindiesee/kooker-workflows/.github/workflows/neo4j-delta-cache.yml@main
+#       uses: duikindiesee/kooker-workflows/.github/workflows/neo4j-delta-cache.yml@<commit-sha>
 #       secrets: inherit
 #       with:
 #         neo4j_base_url: ${{ vars.NEO4J_BASE_URL }}
@@ -17,7 +17,7 @@ on:
   workflow_call:
     inputs:
       neo4j_base_url:
-        description: "Neo4j HTTP base URL (e.g. https://neo4j.example.com)"
+        description: "Neo4j HTTPS base URL (e.g. https://neo4j.example.invalid)"
         required: true
         type: string
       repo_name:
@@ -36,6 +36,16 @@ on:
         description: "Commit message override"
         required: false
         type: string
+      memory_bank_path:
+        description: "Optional relative Markdown path to sync into a :Memory node (e.g. docs/memory_bank.md)"
+        required: false
+        type: string
+        default: ''
+      memory_bank_node_name:
+        description: "Optional :Memory node name when memory_bank_path is provided"
+        required: false
+        type: string
+        default: 'memory_bank'
     secrets:
       NEO4J_USERNAME:
         description: "Neo4j username"
@@ -44,64 +54,107 @@ on:
         description: "Neo4j password"
         required: true
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   cache-delta:
     name: Cache delta to Neo4j
-    # Moved off the GitHub-hosted cloud runner: the org Actions spending limit was blocking every
-    # GitHub-hosted job across several repos. Uses the proven kooker1-org self-hosted pool (see
-    # kooker-infra's org-runner-canary.yml and maven-version-bump.yml/ghcr-retention.yml/
-    # gitops-sync.yml in this repo), not the retired [self-hosted, local-linux] label above.
+    permissions:
+      contents: read
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Resolve metadata
         id: meta
-        run: |
-          REPO_NAME="${REPO_INPUT:-${GITHUB_REPOSITORY##*/}}"
-          SHA="${HEAD_SHA}"
-          PARENT="${BASE_SHA}"
-          TS="${COMMIT_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-          printf '%s' "${COMMIT_MSG}" > /tmp/commit_message.txt
-
-          echo "repo=$REPO_NAME"   >> $GITHUB_OUTPUT
-          echo "sha=$SHA"          >> $GITHUB_OUTPUT
-          echo "parent=$PARENT"    >> $GITHUB_OUTPUT
-          echo "ts=$TS"            >> $GITHUB_OUTPUT
-
-          # Delta: only files changed between parent and current commit
-          if git cat-file -e "$PARENT^{commit}" 2>/dev/null; then
-            git diff --name-only "$PARENT" "$SHA" > /tmp/changed_files.txt
-          else
-            git ls-files > /tmp/changed_files.txt
-          fi
-
-          echo "Files to cache: $(wc -l < /tmp/changed_files.txt)"
-          cat /tmp/changed_files.txt
+        shell: bash
         env:
+          NEO4J_URL: ${{ inputs.neo4j_base_url }}
           BASE_SHA: ${{ inputs.base_sha || github.event.before }}
           COMMIT_MSG: ${{ inputs.commit_message || github.event.head_commit.message }}
           COMMIT_TS: ${{ github.event.head_commit.timestamp }}
           HEAD_SHA: ${{ inputs.head_sha || github.sha }}
           REPO_INPUT: ${{ inputs.repo_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NEO4J_URL" =~ ^https://[^[:space:]]+$ ]] && [[ ! "$NEO4J_URL" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]]; then
+            echo "::error::neo4j_base_url must use https:// (or loopback http:// for local testing), got '$NEO4J_URL'."
+            exit 1
+          fi
+
+          REPO_NAME="${REPO_INPUT:-${GITHUB_REPOSITORY##*/}}"
+          if [[ ! "$REPO_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid repo_name '$REPO_NAME'."
+            exit 1
+          fi
+
+          SHA="${HEAD_SHA}"
+          if [[ ! "$SHA" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+            echo "::error::Invalid head_sha '$SHA'."
+            exit 1
+          fi
+
+          PARENT="${BASE_SHA:-}"
+          if [ -n "$PARENT" ] && [[ ! "$PARENT" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+            echo "::error::Invalid base_sha '$PARENT'."
+            exit 1
+          fi
+
+          TS="${COMMIT_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+          if [[ "$TS" == *$'\n'* ]] || [[ "$TS" == *$'\r'* ]]; then
+            echo "::error::Invalid commit timestamp."
+            exit 1
+          fi
+
+          DELTA_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/neo4j-delta-XXXXXX")"
+          printf '%s' "${COMMIT_MSG}" > "${DELTA_DIR}/commit_message.txt"
+
+          {
+            echo "repo=$REPO_NAME"
+            echo "sha=$SHA"
+            echo "parent=$PARENT"
+            echo "ts=$TS"
+            echo "delta_dir=$DELTA_DIR"
+          } >> "$GITHUB_OUTPUT"
+
+          # Delta: only files changed between parent and current commit
+          if [ -n "$PARENT" ] && git cat-file -e "${PARENT}^{commit}" 2>/dev/null; then
+            git diff --name-only -z "$PARENT" "$SHA" -- > "${DELTA_DIR}/changed_files.bin"
+            tr '\0' '\n' < "${DELTA_DIR}/changed_files.bin" > "${DELTA_DIR}/changed_files.txt"
+          else
+            git ls-files -z > "${DELTA_DIR}/changed_files.bin"
+            tr '\0' '\n' < "${DELTA_DIR}/changed_files.bin" > "${DELTA_DIR}/changed_files.txt"
+          fi
+
+          echo "Files to cache: $(wc -l < "${DELTA_DIR}/changed_files.txt")"
+          cat -- "${DELTA_DIR}/changed_files.txt"
 
       - name: Upsert Commit node
+        shell: bash
         env:
           NEO4J_URL: ${{ inputs.neo4j_base_url }}
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+          REPO: ${{ steps.meta.outputs.repo }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          TS: ${{ steps.meta.outputs.ts }}
+          DELTA_DIR: ${{ steps.meta.outputs.delta_dir }}
         run: |
-          REPO="${{ steps.meta.outputs.repo }}"
-          SHA="${{ steps.meta.outputs.sha }}"
-          TS="${{ steps.meta.outputs.ts }}"
-          MSG="$(cat /tmp/commit_message.txt)"
+          set -euo pipefail
+          if [[ ! "$NEO4J_URL" =~ ^https://[^[:space:]]+$ ]] && [[ ! "$NEO4J_URL" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]]; then
+            echo "::error::Invalid neo4j_base_url '$NEO4J_URL'."
+            exit 1
+          fi
+          MSG="$(cat -- "${DELTA_DIR}/commit_message.txt")"
 
-          PAYLOAD=$(jq -n \
+          PAYLOAD="$(jq -n \
             --arg repo "$REPO" \
             --arg sha "$SHA" \
             --arg msg "$MSG" \
@@ -111,28 +164,54 @@ jobs:
                 statement: "MERGE (r:Repo {name:$repo}) MERGE (c:Commit {sha:$sha}) SET c.message=$msg, c.ts=$ts, c.repo=$repo MERGE (r)-[:HAS_COMMIT]->(c)",
                 parameters: {repo: $repo, sha: $sha, msg: $msg, ts: $ts}
               }]
-            }')
+            }')"
 
-          RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+          CURL_CFG="$(mktemp "${DELTA_DIR}/curl-auth-XXXXXX")"
+          RESP_BODY="$(mktemp "${DELTA_DIR}/resp-XXXXXX")"
+          trap 'rm -f "$CURL_CFG" "$RESP_BODY"' EXIT
+          chmod 600 "$CURL_CFG"
+          AUTH_B64="$(python3 -c 'import base64, os; raw=(os.environ["NEO4J_USER"]+":"+os.environ["NEO4J_PASS"]).encode("utf-8"); print(base64.b64encode(raw).decode("ascii"))')"
+          printf 'header = "Authorization: Basic %s"\n' "$AUTH_B64" > "$CURL_CFG"
+
+          HTTP_CODE="$(curl -sS -o "$RESP_BODY" -w '%{http_code}' -X POST "${NEO4J_URL%/}/db/neo4j/tx/commit" \
             -H "Content-Type: application/json" \
-            -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "$PAYLOAD")
-          if [ "$(echo "$RESPONSE" | jq -r '.errors | length')" -gt 0 ]; then
+            --config "$CURL_CFG" \
+            --data-binary "$PAYLOAD")"
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Neo4j Upsert Commit failed with HTTP $HTTP_CODE" >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.errors | length' "$RESP_BODY")" -gt 0 ]; then
             echo "Neo4j Error:" >&2
-            echo "$RESPONSE" | jq '.errors' >&2
+            jq '.errors' "$RESP_BODY" >&2
             exit 1
           fi
 
       - name: Cache changed files
+        shell: bash
         env:
           NEO4J_URL: ${{ inputs.neo4j_base_url }}
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+          REPO: ${{ steps.meta.outputs.repo }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          DELTA_DIR: ${{ steps.meta.outputs.delta_dir }}
         run: |
-          REPO="${{ steps.meta.outputs.repo }}"
-          SHA="${{ steps.meta.outputs.sha }}"
+          set -euo pipefail
+          if [[ ! "$NEO4J_URL" =~ ^https://[^[:space:]]+$ ]] && [[ ! "$NEO4J_URL" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]]; then
+            echo "::error::Invalid neo4j_base_url '$NEO4J_URL'."
+            exit 1
+          fi
 
-          while IFS= read -r fp; do
+          CURL_CFG="$(mktemp "${DELTA_DIR}/curl-auth-XXXXXX")"
+          RESP_BODY="$(mktemp "${DELTA_DIR}/resp-XXXXXX")"
+          trap 'rm -f "$CURL_CFG" "$RESP_BODY"' EXIT
+          chmod 600 "$CURL_CFG"
+          AUTH_B64="$(python3 -c 'import base64, os; raw=(os.environ["NEO4J_USER"]+":"+os.environ["NEO4J_PASS"]).encode("utf-8"); print(base64.b64encode(raw).decode("ascii"))')"
+          printf 'header = "Authorization: Basic %s"\n' "$AUTH_B64" > "$CURL_CFG"
+
+          while IFS= read -r -d '' fp; do
             [ -z "$fp" ] && continue
             EXT="${fp##*.}"
             case "$EXT" in
@@ -141,14 +220,14 @@ jobs:
             esac
 
             CONTENT_JSON='""'
-            if [ -f "$fp" ]; then
-              SIZE=$(wc -c < "$fp")
+            if [ -f "$fp" ] && [ ! -L "$fp" ]; then
+              SIZE="$(wc -c < "$fp")"
               if [ "$SIZE" -lt 51200 ]; then
-                CONTENT_JSON=$(python3 -c "import json; print(json.dumps(open('$fp').read()))" 2>/dev/null || echo '""')
+                CONTENT_JSON="$(python3 -c 'import json, pathlib, sys; print(json.dumps(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")))' "$fp" 2>/dev/null || echo '""')"
               fi
             fi
 
-            PAYLOAD=$(jq -n \
+            PAYLOAD="$(jq -n \
               --arg repo "$REPO" \
               --arg path "$fp" \
               --arg ext "$EXT" \
@@ -159,46 +238,100 @@ jobs:
                   statement: "MERGE (r:Repo {name:$repo}) MERGE (f:File {path:$path,repo:$repo}) SET f.ext=$ext, f.sha=$sha, f.content=$content MERGE (r)-[:CONTAINS]->(f) WITH f MATCH (c:Commit {sha:$sha}) MERGE (f)-[:CHANGED_IN]->(c)",
                   parameters: {repo: $repo, path: $path, ext: $ext, sha: $sha, content: $content}
                 }]
-              }')
+              }')"
 
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
+            HTTP_CODE="$(curl -sS -o "$RESP_BODY" -w "%{http_code}" -X POST "${NEO4J_URL%/}/db/neo4j/tx/commit" \
               -H "Content-Type: application/json" \
-              -u "$NEO4J_USER:$NEO4J_PASS" \
-              -d "$PAYLOAD")
+              --config "$CURL_CFG" \
+              --data-binary "$PAYLOAD")"
             echo "$HTTP_CODE $fp"
-          done < /tmp/changed_files.txt
+            if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+              echo "::error::Neo4j Cache changed files failed with HTTP $HTTP_CODE for '$fp'" >&2
+              exit 1
+            fi
+            if [ "$(jq -r '.errors | length' "$RESP_BODY")" -gt 0 ]; then
+              echo "Neo4j Error:" >&2
+              jq '.errors' "$RESP_BODY" >&2
+              exit 1
+            fi
+          done < "${DELTA_DIR}/changed_files.bin"
 
-      - name: Sync Memory Bank node (if changed)
-        if: ${{ hashFiles('docs/irwins_memory_bank.md') != '' }}
+      - name: Sync Memory Bank node (if configured and changed)
+        if: inputs.memory_bank_path != ''
+        shell: bash
         env:
           NEO4J_URL: ${{ inputs.neo4j_base_url }}
           NEO4J_USER: ${{ secrets.NEO4J_USERNAME }}
           NEO4J_PASS: ${{ secrets.NEO4J_PASSWORD }}
+          DELTA_DIR: ${{ steps.meta.outputs.delta_dir }}
+          MEMORY_BANK_PATH: ${{ inputs.memory_bank_path }}
+          MEMORY_BANK_NODE: ${{ inputs.memory_bank_node_name }}
         run: |
-          if grep -q "irwins_memory_bank" /tmp/changed_files.txt 2>/dev/null; then
+          set -euo pipefail
+          if [ -z "$MEMORY_BANK_PATH" ] || [[ "$MEMORY_BANK_PATH" == /* ]] || [[ "$MEMORY_BANK_PATH" == ~* ]] || [[ "$MEMORY_BANK_PATH" == -* ]] || [[ "$MEMORY_BANK_PATH" =~ (^|/)\.\.(/|$) ]]; then
+            echo "::error::Invalid memory_bank_path '$MEMORY_BANK_PATH'."
+            exit 1
+          fi
+          if [[ ! "$MEMORY_BANK_NODE" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid memory_bank_node_name '$MEMORY_BANK_NODE'."
+            exit 1
+          fi
+          if [ ! -f "$MEMORY_BANK_PATH" ] || [ -L "$MEMORY_BANK_PATH" ]; then
+            echo "Memory bank file '$MEMORY_BANK_PATH' not present — skipping."
+            exit 0
+          fi
+          if grep -Fxqz -- "$MEMORY_BANK_PATH" "${DELTA_DIR}/changed_files.bin" 2>/dev/null; then
             echo "Memory bank changed — updating :Memory node..."
-            CONTENT=$(python3 -c "import json; print(json.dumps(open('docs/irwins_memory_bank.md').read()))")
+            CONTENT="$(python3 -c 'import json, pathlib, sys; print(json.dumps(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")))' "$MEMORY_BANK_PATH")"
             TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            PAYLOAD=$(jq -n \
+            PAYLOAD="$(jq -n \
+              --arg name "$MEMORY_BANK_NODE" \
               --argjson c "$CONTENT" \
               --arg ts "$TS" \
               '{
                 statements: [{
-                  statement: "MERGE (m:Memory {name:'\''irwins_memory_bank'\''}) SET m.content=$c, m.updatedAt=$ts",
-                  parameters: {c: $c, ts: $ts}
+                  statement: "MERGE (m:Memory {name:$name}) SET m.content=$c, m.updatedAt=$ts",
+                  parameters: {name: $name, c: $c, ts: $ts}
                 }]
-              }')
+              }')"
 
-            RESPONSE=$(curl -s -X POST "$NEO4J_URL/db/neo4j/tx/commit" \
-            -H "Content-Type: application/json" \
-            -u "$NEO4J_USER:$NEO4J_PASS" \
-            -d "$PAYLOAD")
-          if [ "$(echo "$RESPONSE" | jq -r '.errors | length')" -gt 0 ]; then
-            echo "Neo4j Error:" >&2
-            echo "$RESPONSE" | jq '.errors' >&2
-            exit 1
-          fi
+            CURL_CFG="$(mktemp "${DELTA_DIR}/curl-auth-XXXXXX")"
+            RESP_BODY="$(mktemp "${DELTA_DIR}/resp-XXXXXX")"
+            trap 'rm -f "$CURL_CFG" "$RESP_BODY"' EXIT
+            chmod 600 "$CURL_CFG"
+            AUTH_B64="$(python3 -c 'import base64, os; raw=(os.environ["NEO4J_USER"]+":"+os.environ["NEO4J_PASS"]).encode("utf-8"); print(base64.b64encode(raw).decode("ascii"))')"
+            printf 'header = "Authorization: Basic %s"\n' "$AUTH_B64" > "$CURL_CFG"
+
+            HTTP_CODE="$(curl -sS -o "$RESP_BODY" -w "%{http_code}" -X POST "${NEO4J_URL%/}/db/neo4j/tx/commit" \
+              -H "Content-Type: application/json" \
+              --config "$CURL_CFG" \
+              --data-binary "$PAYLOAD")"
+            if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+              echo "::error::Neo4j Memory Bank sync failed with HTTP $HTTP_CODE" >&2
+              exit 1
+            fi
+            if [ "$(jq -r '.errors | length' "$RESP_BODY")" -gt 0 ]; then
+              echo "Neo4j Error:" >&2
+              jq '.errors' "$RESP_BODY" >&2
+              exit 1
+            fi
             echo "Done."
           else
             echo "Memory bank unchanged — skipping."
           fi
+
+      - name: Cleanup temporary delta workspace
+        if: always() && steps.meta.outputs.delta_dir != ''
+        shell: bash
+        env:
+          DELTA_DIR: ${{ steps.meta.outputs.delta_dir }}
+        run: |
+          set -euo pipefail
+          case "$DELTA_DIR" in
+            "${RUNNER_TEMP:-/tmp}/neo4j-delta-"*)
+              rm -rf -- "$DELTA_DIR"
+              ;;
+            *)
+              echo "::warning::Skipping cleanup of unexpected path '$DELTA_DIR'."
+              ;;
+          esac
