@@ -43,22 +43,42 @@ LOCK_PATH=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --kustomize-path)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --kustomize-path requires an argument" >&2
+        exit 1
+      fi
       KUSTOMIZE_PATH="$2"
       shift 2
       ;;
     --image-name)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --image-name requires an argument" >&2
+        exit 1
+      fi
       IMAGE_NAME="$2"
       shift 2
       ;;
     --new-tag)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --new-tag requires an argument" >&2
+        exit 1
+      fi
       NEW_TAG="$2"
       shift 2
       ;;
     --infra-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --infra-dir requires an argument" >&2
+        exit 1
+      fi
       INFRA_DIR="$2"
       shift 2
       ;;
     --lock-path)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --lock-path requires an argument" >&2
+        exit 1
+      fi
       LOCK_PATH="$2"
       shift 2
       ;;
@@ -83,7 +103,7 @@ if [[ ! -d "$INFRA_DIR" ]]; then
   exit 1
 fi
 
-INFRA_ROOT="$(cd "$INFRA_DIR" && pwd -P)"
+INFRA_ROOT="$(cd -- "$INFRA_DIR" && pwd -P)"
 
 if [[ "$KUSTOMIZE_PATH" == /* || "$KUSTOMIZE_PATH" == ~* ]]; then
   echo "ERROR: Invalid or absolute kustomize_path '$KUSTOMIZE_PATH'. Fails closed." >&2
@@ -95,7 +115,7 @@ if [[ ! -d "$INFRA_ROOT/$KUSTOMIZE_PATH" ]]; then
   exit 1
 fi
 
-TARGET_CANONICAL="$(cd "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
+TARGET_CANONICAL="$(cd -- "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
 
 case "$TARGET_CANONICAL" in
   "$INFRA_ROOT"/*)
@@ -149,11 +169,15 @@ elif command -v node >/dev/null 2>&1; then
     is_valid_json=1
   fi
 elif command -v python3 >/dev/null 2>&1; then
-  if python3 -c "import json, sys; json.load(open(sys.argv[1]))" "$LOCK_PATH" >/dev/null 2>&1; then
+  if python3 -c "import json, sys;
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    json.load(f)" "$LOCK_PATH" >/dev/null 2>&1; then
     is_valid_json=1
   fi
 elif command -v python >/dev/null 2>&1; then
-  if python -c "import json, sys; json.load(open(sys.argv[1]))" "$LOCK_PATH" >/dev/null 2>&1; then
+  if python -c "import json, sys;
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    json.load(f)" "$LOCK_PATH" >/dev/null 2>&1; then
     is_valid_json=1
   fi
 fi

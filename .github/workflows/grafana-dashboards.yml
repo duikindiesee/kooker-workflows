@@ -6,17 +6,49 @@ on:
       KOOKER_GRAFANA_PAT:
         required: true
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   load-grafana:
+    permissions:
+      contents: read
     runs-on: windows-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Load Grafana Dashboards via script
+        shell: pwsh
         env:
           KOOKER_GRAFANA_PAT: ${{ secrets.KOOKER_GRAFANA_PAT }}
         run: |
-          powershell -ExecutionPolicy Bypass -File load-grafana-dashboards.ps1
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:KOOKER_GRAFANA_PAT)) {
+            Write-Error '::error::Missing required KOOKER_GRAFANA_PAT secret.'
+            exit 1
+          }
+          $repoRoot = (Resolve-Path -LiteralPath (Get-Location)).Path
+          $scriptPath = Join-Path $repoRoot 'load-grafana-dashboards.ps1'
+          if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+            Write-Error '::error::Missing required load-grafana-dashboards.ps1 in calling repository root.'
+            exit 1
+          }
+          $item = Get-Item -LiteralPath $scriptPath
+          if ($null -ne $item.LinkType) {
+            Write-Error '::error::Refusing symlinked load-grafana-dashboards.ps1.'
+            exit 1
+          }
+          $resolvedScript = (Resolve-Path -LiteralPath $scriptPath).Path
+          if (-not $resolvedScript.StartsWith($repoRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-Error '::error::load-grafana-dashboards.ps1 resolves outside repository root.'
+            exit 1
+          }
+          & $resolvedScript
+          if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }

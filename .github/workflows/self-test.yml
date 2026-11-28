@@ -3,12 +3,10 @@
 # =============================================================================
 # PURPOSE
 #   This repository ships reusable workflows and shared scripts consumed by
-#   every other duikindiesee Maven repository — it has no build of its own to
-#   run on push/PR. This workflow is that missing "build": it runs this
-#   repo's own script test suites (currently just
-#   tests/check-jdk25-baseline.test.sh) on every push and pull request, so a
-#   regression in a shared guard is caught here, once, before it can ever
-#   reach a consuming repo.
+#   every other duikindiesee repository — it has no application build of its
+#   own. This workflow runs all script, security-contract, and workflow
+#   regression suites on every push and pull request before changes reach
+#   consuming repositories.
 # =============================================================================
 
 name: Self Test
@@ -18,49 +16,138 @@ on:
     branches: ["**"]
   pull_request:
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   script-tests:
+    permissions:
+      contents: read
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: JDK 25 baseline guard — fixture test suite
-        run: bash tests/check-jdk25-baseline.test.sh
-
-      - name: Adoption lock guard and GitOps workflow regression suite
-        run: bash tests/check-adoption-lock.test.sh
-
-      - name: Set up Node.js for version-bump contract tests
-        uses: actions/setup-node@v6
+      - name: Set up Node.js for workflow contract tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
-      - name: Node version-bump package-only regression suite
-        run: bash tests/check-node-version-bump.test.sh
-
-      - name: Node bump merge-trigger identity and mocked shell controls
-        run: node tests/check-node-merge-trigger.cjs
-
-      - name: Install pinned test-only dependencies for workflow contract tests
-        run: npm ci --prefix tests
-
-      - name: Node bump release creation opt-out contract and expression controls
-        run: node tests/check-node-release-optout.cjs
-
-      - name: GHCR centralized retention tag-protection regression suite
-        run: node tests/check-ghcr-retention.test.cjs
+      - name: Install pinned test-only dependencies (scripts disabled)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix tests --ignore-scripts
 
       - name: Set up Kustomize for GitOps integration tests
-        uses: imranismail/setup-kustomize@v2
+        uses: imranismail/setup-kustomize@2ba527d4d055ab63514ba50a99456fc35684947f # v2
         with:
           kustomize-version: 5.7.1
 
+      - name: JDK 25 baseline guard — fixture test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-jdk25-baseline.test.sh
+
+      - name: JDK 25 baseline guard workflow — contract & injection suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-jdk25-workflow.test.cjs
+
+      - name: Swagger enforce — fail-closed OpenAPI & JDK 25 regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-swagger-enforce.test.sh
+
+      - name: Flyway lint — workflow & pre-commit hook regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-flyway-lint.test.sh
+
+      - name: Adoption lock guard and GitOps workflow regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-adoption-lock.test.sh
+
+      - name: Node version-bump package-only regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-node-version-bump.test.sh
+
+      - name: Node bump merge-trigger identity and mocked shell controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-node-merge-trigger.cjs
+
+      - name: Node bump release creation opt-out contract and expression controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-node-release-optout.cjs
+
+      - name: Version bumps (Android, Maven, Auto-Version) regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-version-bumps.test.sh
+
+      - name: Neo4j delta cache security & serialization regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/check-neo4j-delta-cache.test.sh
+
+      - name: GHCR centralized retention tag-protection regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-ghcr-retention.test.cjs
+
       - name: GitOps digest supplementary contract checks (D01-D22 static/copied parsers)
-        run: node tests/check-gitops-digest.test.cjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-gitops-digest.test.cjs
 
       - name: GitOps digest runtime regression suite (actual production steps and consumer CLI)
-        run: node tests/check-gitops-digest-integration.cjs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-gitops-digest-integration.cjs
+
+      - name: Miscellaneous workflows (Grafana, Self-Test) coverage & contract suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-misc-workflows.test.cjs
+
+      - name: Repo-wide workflow static security & public-safety gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/check-workflow-security.test.cjs
+
+      - name: Actionlint static workflow check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v actionlint >/dev/null 2>&1; then
+            actionlint
+          else
+            cid="$(docker create -w /tmp rhysd/actionlint:1.7.7)"
+            trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+            docker cp "${GITHUB_WORKSPACE}/.github" "$cid:/tmp/"
+            docker cp "${GITHUB_WORKSPACE}/.git" "$cid:/tmp/"
+            docker start -a "$cid"
+          fi

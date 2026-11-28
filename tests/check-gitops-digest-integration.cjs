@@ -1885,8 +1885,8 @@ runConsumerTestCase({
     const libContent = fs.readFileSync(path.join(__dirname, '../scripts/lib/kustomize-digest.js'), 'utf8');
 
     // Assert actual copied bytes match verified shasum
-    assert.equal(sha256(Buffer.from(cliContent)), '6023d98bca1f169587523fdb9c112465318906ee62df9e57bd454e8c89860ab1');
-    assert.equal(sha256(Buffer.from(libContent)), 'f6556b14bf946cbdf3805fd5944290992428fcb24ebc31dc869783797c8b671c');
+    assert.equal(sha256(Buffer.from(cliContent)), '5ca2fbf55c74e0c8d7a1a8216770bc0a170515835514ce9f53f0bd85f058b8e8');
+    assert.equal(sha256(Buffer.from(libContent)), 'e55f9bbfeec94dba0065ec864825b3932261dd89415ecac786365714f654f58f');
 
     const isolatedCliPath = path.join(fixtureScriptsDir, 'update-gitops-digest.mjs');
     fs.writeFileSync(isolatedCliPath, cliContent, { mode: 0o755 });
@@ -2764,8 +2764,9 @@ function runHelperIdentityCase({
 {
   const checkoutStep = workflowDoc.jobs.sync.steps.find(s => s.name === 'Checkout shared workflow helper');
   assert.ok(checkoutStep, 'Checkout shared workflow helper step must exist in workflow');
-  assert.equal(checkoutStep.with.repository, '${{ job.workflow_repository }}');
-  assert.equal(checkoutStep.with.ref, '${{ job.workflow_sha }}');
+  assert.equal(checkoutStep.with.repository, 'duikindiesee/kooker-workflows');
+  assert.equal(checkoutStep.with.ref, '${{ github.workflow_sha }}');
+  assert.equal(checkoutStep.with['persist-credentials'], false);
   assert.equal(checkoutStep.with.path, '.shared-workflows');
   assert.ok(checkoutStep.with['sparse-checkout'].includes('scripts/lib'));
   assert.ok(checkoutStep.with['sparse-checkout'].includes('scripts/update-gitops-digest.mjs'));
@@ -2775,8 +2776,7 @@ function runHelperIdentityCase({
 runHelperIdentityCase({
   name: 'helper identity - valid parameters',
   envVars: {
-    WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-    WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+    WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
     WORKFLOW_SHA: 'a'.repeat(40)
   },
   stepToRun: 'validate',
@@ -2787,8 +2787,7 @@ runHelperIdentityCase({
 runHelperIdentityCase({
   name: 'helper identity - wrong repository refused',
   envVars: {
-    WORKFLOW_REPO: 'unauthorized/other-workflows',
-    WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+    WORKFLOW_REF: 'unauthorized/other-workflows/.github/workflows/gitops-sync.yml@main',
     WORKFLOW_SHA: 'a'.repeat(40)
   },
   stepToRun: 'validate',
@@ -2799,8 +2798,7 @@ runHelperIdentityCase({
 runHelperIdentityCase({
   name: 'helper identity - wrong workflow file path refused',
   envVars: {
-    WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-    WORKFLOW_PATH: '.github/workflows/other.yml',
+    WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/other.yml@main',
     WORKFLOW_SHA: 'a'.repeat(40)
   },
   stepToRun: 'validate',
@@ -2811,8 +2809,7 @@ runHelperIdentityCase({
 runHelperIdentityCase({
   name: 'helper identity - branch name ref refused',
   envVars: {
-    WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-    WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+    WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
     WORKFLOW_SHA: 'main'
   },
   stepToRun: 'validate',
@@ -2823,8 +2820,7 @@ runHelperIdentityCase({
 runHelperIdentityCase({
   name: 'helper identity - uppercase SHA refused',
   envVars: {
-    WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-    WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+    WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
     WORKFLOW_SHA: 'A'.repeat(40)
   },
   stepToRun: 'validate',
@@ -2960,8 +2956,7 @@ function runValidHelperOfflineChainCase() {
     // Step A: Execute actual Validate shared workflow helper identity step
     const valEnv = {
       ...process.env,
-      WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-      WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+      WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
       WORKFLOW_SHA: requestedCommitSha
     };
     const r1 = spawnSync('/bin/bash', ['-c', STEP_VALIDATE_HELPER], {
@@ -3165,8 +3160,7 @@ function runConnectedHelperNegativeChainCase({
     // Missing job identity env vars are explicitly EMPTY strings, never inherited host values
     const valEnv = {
       ...process.env,
-      WORKFLOW_REPO: (envOverride.WORKFLOW_REPO !== undefined) ? envOverride.WORKFLOW_REPO : 'duikindiesee/kooker-workflows',
-      WORKFLOW_PATH: (envOverride.WORKFLOW_PATH !== undefined) ? envOverride.WORKFLOW_PATH : '.github/workflows/gitops-sync.yml',
+      WORKFLOW_REF: (envOverride.WORKFLOW_REF !== undefined) ? envOverride.WORKFLOW_REF : 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
       WORKFLOW_SHA: (envOverride.WORKFLOW_SHA !== undefined) ? envOverride.WORKFLOW_SHA : actualValidCommitSha
     };
 
@@ -3369,18 +3363,18 @@ runConnectedHelperNegativeChainCase({
   expectedDiagnosticSubstr: ''
 });
 
-// 1. Empty repository
+// 1. Empty workflow ref
 runConnectedHelperNegativeChainCase({
   name: 'empty repository refused',
-  envOverride: { WORKFLOW_REPO: '' },
+  envOverride: { WORKFLOW_REF: '' },
   expectedFailureStage: '1_validate_identity',
-  expectedDiagnosticSubstr: "Invalid reusable workflow repository: ''"
+  expectedDiagnosticSubstr: "Invalid reusable workflow ref: ''"
 });
 
 // 2. Empty workflow file path
 runConnectedHelperNegativeChainCase({
   name: 'empty workflow path refused',
-  envOverride: { WORKFLOW_PATH: '' },
+  envOverride: { WORKFLOW_REF: 'duikindiesee/kooker-workflows/@main' },
   expectedFailureStage: '1_validate_identity',
   expectedDiagnosticSubstr: "Invalid reusable workflow file path: ''"
 });
@@ -3404,7 +3398,7 @@ runConnectedHelperNegativeChainCase({
 // 5. Wrong workflow repository
 runConnectedHelperNegativeChainCase({
   name: 'wrong repository refused',
-  envOverride: { WORKFLOW_REPO: 'unauthorized/caller-repo' },
+  envOverride: { WORKFLOW_REF: 'unauthorized/caller-repo/.github/workflows/gitops-sync.yml@main' },
   expectedFailureStage: '1_validate_identity',
   expectedDiagnosticSubstr: "Invalid reusable workflow repository: 'unauthorized/caller-repo'"
 });
@@ -3412,7 +3406,7 @@ runConnectedHelperNegativeChainCase({
 // 6. Wrong workflow file path
 runConnectedHelperNegativeChainCase({
   name: 'wrong workflow path refused',
-  envOverride: { WORKFLOW_PATH: '.github/workflows/other.yml' },
+  envOverride: { WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/other.yml@main' },
   expectedFailureStage: '1_validate_identity',
   expectedDiagnosticSubstr: "Invalid reusable workflow file path: '.github/workflows/other.yml'"
 });
@@ -3592,7 +3586,7 @@ esac
 CMD="$1"
 case "$CMD" in
   diff)
-    if [ "$#" -ne 2 ] || [ "$2" != "--quiet" ]; then
+    if ! { [ "$#" -eq 2 ] && [ "$2" = "--quiet" ]; } && ! { [ "$#" -eq 4 ] && [ "$2" = "--quiet" ] && [ "$3" = "--" ]; }; then
       echo "FAIL_CLOSED: Disallowed git diff invocation: $*" >&2
       exit 128
     fi
@@ -3610,7 +3604,7 @@ case "$CMD" in
     fi
     ;;
   add)
-    if [ "$#" -ne 2 ] || [ "$2" != "." ]; then
+    if ! { [ "$#" -eq 2 ] && [ "$2" = "." ]; } && ! { [ "$#" -eq 3 ] && [ "$2" = "--" ] && [ -n "$3" ] && [ "$3" != "." ]; }; then
       echo "FAIL_CLOSED: Disallowed git add invocation: $*" >&2
       exit 128
     fi
@@ -3622,7 +3616,7 @@ case "$CMD" in
     fi
     ;;
   push)
-    if [ "$#" -ne 3 ] || [ "$2" != "origin" ]; then
+    if ! { [ "$#" -eq 3 ] && [ "$2" = "origin" ]; } && ! { [ "$#" -eq 4 ] && [ "$2" = "origin" ] && [ "$3" = "--" ]; }; then
       echo "FAIL_CLOSED: Disallowed git push invocation: $*" >&2
       exit 128
     fi
@@ -3868,8 +3862,7 @@ exit 0
     if (!actualFailureStage && activeMode === 'digest') {
       const stage4Env = {
         ...process.env,
-        WORKFLOW_REPO: 'duikindiesee/kooker-workflows',
-        WORKFLOW_PATH: '.github/workflows/gitops-sync.yml',
+        WORKFLOW_REF: 'duikindiesee/kooker-workflows/.github/workflows/gitops-sync.yml@main',
         WORKFLOW_SHA: actualValidCommitSha
       };
       const r4 = spawnSync('/bin/bash', ['-c', STEP_VALIDATE_HELPER], {

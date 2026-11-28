@@ -11,7 +11,7 @@
 # USAGE (in calling workflow)
 #   jobs:
 #     retention:
-#       uses: duikindiesee/kooker-workflows/.github/workflows/ghcr-retention.yml@main
+#       uses: duikindiesee/kooker-workflows/.github/workflows/ghcr-retention.yml@<commit-sha>
 #       secrets: inherit
 # =============================================================================
 
@@ -39,17 +39,19 @@ on:
       MAVEN_PUBLISH_TOKEN:
         required: true
 
-permissions:
-  packages: write
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   prune-ghcr:
+    permissions:
+      packages: write
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
@@ -69,6 +71,7 @@ jobs:
 
           const RATE_LIMIT = 100;
           const MAX_PAGE_TRAVERSAL = 50; // Max 50 pages * 100 items = 5000 versions maximum
+          const MAX_REGEX_LENGTH = 256;
           const REQUEST_TIMEOUT_MS = Number(process.env.GITHUB_REQUEST_TIMEOUT_MS) > 0 ? Number(process.env.GITHUB_REQUEST_TIMEOUT_MS) : 10000;
           const STREAM_INACTIVITY_MS = Number(process.env.GITHUB_STREAM_INACTIVITY_MS) > 0 ? Number(process.env.GITHUB_STREAM_INACTIVITY_MS) : Math.min(REQUEST_TIMEOUT_MS, 5000);
           const MAX_RESPONSE_BYTES = Number(process.env.GITHUB_MAX_RESPONSE_BYTES) > 0 ? Number(process.env.GITHUB_MAX_RESPONSE_BYTES) : 5 * 1024 * 1024;
@@ -85,6 +88,11 @@ jobs:
             console.error('FAIL: [ERR_CONFIG_MISSING] Missing owner or package-name');
             process.exit(1);
           }
+          const isValidSegment = (s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== '.' && s !== '..' && !s.includes('..');
+          if (!isValidSegment(rawOwner) || !isValidSegment(rawPackage)) {
+            console.error('FAIL: [ERR_CONFIG_INVALID] Invalid owner or package-name segment');
+            process.exit(1);
+          }
 
           const rawMinKeep = (process.env.INPUT_MIN_VERSIONS_TO_KEEP || '').trim();
           if (!/^(0|[1-9][0-9]*)$/.test(rawMinKeep)) {
@@ -98,6 +106,10 @@ jobs:
           }
 
           const rawRegex = (process.env.INPUT_IGNORE_VERSIONS || '').trim();
+          if (rawRegex.length > MAX_REGEX_LENGTH) {
+            console.error(`FAIL: [ERR_REGEX_INVALID] ignore-versions regex exceeds ${MAX_REGEX_LENGTH} character cap`);
+            process.exit(1);
+          }
           let ignoreRegex;
           try {
             ignoreRegex = new RegExp(rawRegex);
@@ -107,6 +119,18 @@ jobs:
           }
 
           const baseUrlStr = process.env.GITHUB_API_URL || 'https://api.github.com';
+          let parsedBaseUrl;
+          try {
+            parsedBaseUrl = new URL(baseUrlStr);
+          } catch (err) {
+            console.error('FAIL: [ERR_CONFIG_INVALID] Invalid GITHUB_API_URL');
+            process.exit(1);
+          }
+          const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+          if (parsedBaseUrl.protocol !== 'https:' && !(parsedBaseUrl.protocol === 'http:' && LOOPBACK_HOSTS.has(parsedBaseUrl.hostname))) {
+            console.error('FAIL: [ERR_INSECURE_PROTOCOL] Plaintext http: API URL is only allowed for loopback test harnesses');
+            process.exit(1);
+          }
 
           function request(method, pathStr) {
             return new Promise((resolve, reject) => {
@@ -244,15 +268,12 @@ jobs:
                   }
                   if (parsed.length === 0) break;
 
-                  // Detect repeated full page / duplicate ID during pagination
-                  let newIdsInPage = 0;
                   for (const item of parsed) {
                     if (item && typeof item.id === 'number' && Number.isInteger(item.id) && item.id > 0) {
                       if (seenIds.has(item.id)) {
                         throw new Error(`[ERR_DUPLICATE_VERSION_ID] Duplicate version ID ${item.id} encountered during pagination`);
                       }
                       seenIds.add(item.id);
-                      newIdsInPage++;
                     }
                   }
 
@@ -280,7 +301,6 @@ jobs:
               }
               if (parsed.length === 0) break;
 
-              // Detect repeated page / duplicate ID during traversal
               for (const item of parsed) {
                 if (item && typeof item.id === 'number' && Number.isInteger(item.id) && item.id > 0) {
                   if (seenIds.has(item.id)) {
@@ -315,7 +335,6 @@ jobs:
             const { versions, baseEndpoint } = fetchResult;
             console.log(`Total package versions fetched: ${versions.length}`);
 
-            // Strict metadata validation of version items before any deletion
             const validatedIds = new Set();
             for (const v of versions) {
               if (typeof v.id !== 'number' || !Number.isInteger(v.id) || v.id <= 0) {
@@ -347,8 +366,6 @@ jobs:
               }
             }
 
-            // Protection evaluation:
-            // A version is protected if ignoreRegex matches v.name OR ANY tag in metadata.container.tags.
             const protectedVersions = [];
             const eligibleVersions = [];
 
@@ -376,7 +393,6 @@ jobs:
 
             console.log(`Classification: ${protectedVersions.length} protected, ${eligibleVersions.length} eligible for deletion`);
 
-            // Sort eligible versions oldest-first: created_at asc, then id asc
             eligibleVersions.sort((a, b) => {
               const timeA = new Date(a.created_at).getTime();
               const timeB = new Date(b.created_at).getTime();
@@ -386,10 +402,6 @@ jobs:
               return timeA - timeB;
             });
 
-            // Compute deletion count respecting floor and batch rate limit:
-            // Upstream actions/delete-package-versions finalIds intent:
-            // filters protected versions first, then keeps minVersionsToKeep unprotected versions:
-            // toDelete = Math.min(eligibleVersions.length - minVersionsToKeep, RATE_LIMIT)
             const allowedDeletions = eligibleVersions.length - minVersionsToKeep;
             const toDeleteCount = Math.min(allowedDeletions, RATE_LIMIT);
 
@@ -418,4 +430,3 @@ jobs:
             console.error('Unhandled fatal error in retention runner:', err.message || err);
             process.exit(1);
           });
-

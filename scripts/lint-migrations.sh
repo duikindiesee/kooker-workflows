@@ -52,12 +52,12 @@ FAIL=0
 
 echo "[kooker-lint] Checking staged migration files..."
 
-while IFS= read -r file; do
+while IFS= read -r file || [ -n "$file" ]; do
   [ -z "$file" ] && continue
 
   # ── Naming convention ──────────────────────────────────────────────────
-  fname=$(basename "$file")
-  if ! echo "$fname" | grep -qE "$NAMING_RE"; then
+  fname=$(basename -- "$file")
+  if ! printf '%s\n' "$fname" | grep -qE "$NAMING_RE"; then
     echo "[kooker-lint] ✖ NAMING: '$fname' must match V<N>__<description>.sql"
     FAIL=1
   fi
@@ -67,20 +67,54 @@ while IFS= read -r file; do
   # This ensures we check exactly what will be committed, even if the
   # developer has made further edits after staging.
   LINE_NUM=0
-  while IFS= read -r line; do
-    LINE_NUM=$((LINE_NUM+1))
-    # Skip SQL single-line comments to prevent false positives (e.g. -- DROP TABLE example)
-    TRIMMED=$(echo "$line" | sed 's/^[[:space:]]*//')
+  IN_BLOCK_COMMENT=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    LINE_NUM=$((LINE_NUM + 1))
+    line="${line%$'\r'}"
+    if printf '%s\n' "$line" | grep -qi 'kooker:allow-breaking'; then
+      continue
+    fi
+
+    CLEAN=""
+    REST="$line"
+    while [ -n "$REST" ]; do
+      if [ "$IN_BLOCK_COMMENT" -eq 1 ]; then
+        if [[ "$REST" == *"*/"* ]]; then
+          REST="${REST#*"*/"}"
+          IN_BLOCK_COMMENT=0
+        else
+          REST=""
+        fi
+      else
+        if [[ "$REST" == *"/*"* ]]; then
+          CLEAN="${CLEAN}${REST%%"/*"*}"
+          AFTER="${REST#*"/*"}"
+          if [[ "$AFTER" == *"*/"* ]]; then
+            REST="${AFTER#*"*/"}"
+          else
+            IN_BLOCK_COMMENT=1
+            REST=""
+          fi
+        else
+          CLEAN="${CLEAN}${REST}"
+          REST=""
+        fi
+      fi
+    done
+
+    # Skip SQL single-line comments and blank lines to prevent false positives
+    TRIMMED="${CLEAN#"${CLEAN%%[![:space:]]*}"}"
+    [ -z "$TRIMMED" ] && continue
     [[ "$TRIMMED" == --* ]] && continue
-    echo "$line" | grep -qi 'kooker:allow-breaking' && continue
-    UPPER=$(echo "$line" | tr '[:lower:]' '[:upper:]')
+
+    UPPER=$(printf '%s\n' "$CLEAN" | tr '[:lower:]' '[:upper:]')
     for PAT in "${BREAKING_PATTERNS[@]}"; do
-      if echo "$UPPER" | grep -qE "$PAT"; then
+      if printf '%s\n' "$UPPER" | grep -qE "$PAT"; then
         echo "[kooker-lint] ✖ BREAKING at ${file}:${LINE_NUM} → $line"
         FAIL=1
       fi
     done
-  done < <(git show ":${file}" 2>/dev/null || cat "$file")
+  done < <(git show ":${file}" 2>/dev/null || cat -- "$file")
 done <<< "$STAGED"
 
 if [ $FAIL -ne 0 ]; then

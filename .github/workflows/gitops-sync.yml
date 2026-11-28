@@ -36,10 +36,15 @@ on:
         type: string
         default: 'main'
 
+permissions: {}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   sync:
+    permissions:
+      contents: read
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
       - name: Validate the immutable image reference
@@ -51,6 +56,7 @@ jobs:
           NEW_DIGEST: ${{ inputs.new_digest }}
           CALLER_REPO: ${{ github.repository }}
           KUSTOMIZE_PATH: ${{ inputs.kustomize_path }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           set -euo pipefail
           if [[ ! "$IMAGE_NAME" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_./-]+$ ]]; then
@@ -59,6 +65,15 @@ jobs:
           fi
           if [[ ! "$NEW_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
             echo "::error::new_tag is not a valid OCI tag"
+            exit 1
+          fi
+          TARGET_BRANCH="${TARGET_BRANCH:-main}"
+          if [[ ! "$TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$TARGET_BRANCH" == -* ]] || [[ "$TARGET_BRANCH" == /* ]] || [[ "$TARGET_BRANCH" == *".."* ]]; then
+            echo "::error::Invalid target_branch '$TARGET_BRANCH'"
+            exit 1
+          fi
+          if [ -z "$KUSTOMIZE_PATH" ] || [[ "$KUSTOMIZE_PATH" == /* ]] || [[ "$KUSTOMIZE_PATH" == ~* ]] || [[ "$KUSTOMIZE_PATH" == -* ]] || [[ "$KUSTOMIZE_PATH" == *$'\n'* ]] || [[ "$KUSTOMIZE_PATH" == *$'\r'* ]]; then
+            echo "::error::Invalid kustomize_path '$KUSTOMIZE_PATH'"
             exit 1
           fi
 
@@ -88,18 +103,18 @@ jobs:
           echo "reference=${IMAGE_NAME}:${NEW_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to GHCR for release proof
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
 
       - name: Set up Buildx for registry inspection
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Set up Node.js for digest inspection
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
@@ -141,6 +156,7 @@ jobs:
             PGID=$(ps -o pgid= -p "$PID" 2>/dev/null | tr -d ' ' || true)
 
             TIMEOUT_LIMIT=30
+            # shellcheck disable=SC2016
             MONITOR_RESULT=$(node -e '
               const fs = require("node:fs");
               const pid = parseInt(process.argv[1], 10);
@@ -259,6 +275,7 @@ jobs:
               exit 1
             fi
 
+            # shellcheck disable=SC2016
             node -e '
               const fs = require("node:fs");
               const expected = process.argv[1];
@@ -300,10 +317,11 @@ jobs:
           fi
 
       - name: Checkout kooker-infra
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: duikindiesee/kooker-infra
           token: ${{ secrets.MAVEN_PUBLISH_TOKEN }}
+          persist-credentials: false
           path: infra
           ref: ${{ inputs.target_branch }}
 
@@ -324,7 +342,7 @@ jobs:
             exit 1
           fi
 
-          INFRA_ROOT="$(cd "$INFRA_DIR" && pwd -P)"
+          INFRA_ROOT="$(cd -- "$INFRA_DIR" && pwd -P)"
 
           if [ -z "$KUSTOMIZE_PATH" ] || [[ "$KUSTOMIZE_PATH" == /* ]] || [[ "$KUSTOMIZE_PATH" == ~* ]]; then
             echo "::error::Invalid or absolute kustomize_path: '$KUSTOMIZE_PATH'. Fails closed."
@@ -336,7 +354,7 @@ jobs:
             exit 1
           fi
 
-          TARGET_CANONICAL="$(cd "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
+          TARGET_CANONICAL="$(cd -- "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
 
           case "$TARGET_CANONICAL" in
             "$INFRA_ROOT"/*)
@@ -382,11 +400,13 @@ jobs:
           exit 1
 
       - name: Install Kustomize
-        uses: imranismail/setup-kustomize@v2
+        uses: imranismail/setup-kustomize@2ba527d4d055ab63514ba50a99456fc35684947f # v2
+        with:
+          kustomize-version: 5.7.1
 
       - name: Set up Node.js for digest mode
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
 
@@ -394,13 +414,20 @@ jobs:
         if: steps.image.outputs.mode == 'digest'
         shell: bash
         env:
-          WORKFLOW_REPO: ${{ job.workflow_repository }}
-          WORKFLOW_PATH: ${{ job.workflow_file_path }}
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           EXPECTED_REPO="duikindiesee/kooker-workflows"
           EXPECTED_PATH=".github/workflows/gitops-sync.yml"
+
+          REF_WITHOUT_AT="${WORKFLOW_REF%@*}"
+          if [ -z "$WORKFLOW_REF" ] || [ "$REF_WITHOUT_AT" = "$WORKFLOW_REF" ]; then
+            echo "::error::Invalid reusable workflow ref: '$WORKFLOW_REF'. Fails closed."
+            exit 1
+          fi
+          WORKFLOW_REPO="$(printf '%s' "$REF_WITHOUT_AT" | cut -d/ -f1-2)"
+          WORKFLOW_PATH="${REF_WITHOUT_AT#"$WORKFLOW_REPO"/}"
 
           if [ "$WORKFLOW_REPO" != "$EXPECTED_REPO" ]; then
             echo "::error::Invalid reusable workflow repository: '$WORKFLOW_REPO' (expected '$EXPECTED_REPO'). Fails closed."
@@ -421,10 +448,11 @@ jobs:
 
       - name: Checkout shared workflow helper
         if: steps.image.outputs.mode == 'digest'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
+          repository: duikindiesee/kooker-workflows
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
           path: .shared-workflows
           sparse-checkout: |
             scripts/lib
@@ -437,7 +465,7 @@ jobs:
         if: steps.image.outputs.mode == 'digest'
         shell: bash
         env:
-          EXPECTED_SHA: ${{ job.workflow_sha }}
+          EXPECTED_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           if [ ! -d ".shared-workflows/.git" ] && [ ! -f ".shared-workflows/.git" ]; then
@@ -455,7 +483,10 @@ jobs:
 
       - name: Install pinned parser dependencies
         if: steps.image.outputs.mode == 'digest'
-        run: npm ci --prefix .shared-workflows/tests --ignore-scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix .shared-workflows/tests --ignore-scripts
 
       - name: Update Kustomize Image
         shell: bash
@@ -473,8 +504,31 @@ jobs:
             NODE_PATH=".shared-workflows/tests/node_modules" \
             node .shared-workflows/scripts/update-gitops-digest.mjs
           else
-            cd infra/${KUSTOMIZE_PATH}
-            kustomize edit set image ${IMAGE_NAME}=${IMAGE_NAME}:${NEW_TAG}
+            if [ -z "$KUSTOMIZE_PATH" ] || [[ "$KUSTOMIZE_PATH" == /* ]] || [[ "$KUSTOMIZE_PATH" == ~* ]] || [[ "$KUSTOMIZE_PATH" == -* ]] || [[ "$KUSTOMIZE_PATH" == *$'\n'* ]] || [[ "$KUSTOMIZE_PATH" == *$'\r'* ]] || [[ "$KUSTOMIZE_PATH" =~ (^|/)\.\.(/|$) ]]; then
+              echo "::error::Invalid kustomize_path in tag mode: '$KUSTOMIZE_PATH'. Fails closed."
+              exit 1
+            fi
+            INFRA_ROOT="$(cd -- "${INFRA_DIR:-infra}" && pwd -P)"
+            if [ ! -d "${INFRA_ROOT}/${KUSTOMIZE_PATH}" ]; then
+              echo "::error::Kustomize target directory does not exist in infra: '$KUSTOMIZE_PATH'. Fails closed."
+              exit 1
+            fi
+            TARGET_CANONICAL="$(cd -- "${INFRA_ROOT}/${KUSTOMIZE_PATH}" && pwd -P)"
+            case "$TARGET_CANONICAL" in
+              "$INFRA_ROOT"/*) ;;
+              *)
+                echo "::error::Kustomize path escapes infra root: '$KUSTOMIZE_PATH'. Fails closed."
+                exit 1
+                ;;
+            esac
+            for kfile in kustomization.yaml kustomization.yml Kustomization; do
+              if [ -e "${TARGET_CANONICAL}/${kfile}" ] && [ -L "${TARGET_CANONICAL}/${kfile}" ]; then
+                echo "::error::Kustomization file must not be a symbolic link: ${TARGET_CANONICAL}/${kfile}"
+                exit 1
+              fi
+            done
+            cd -- "$TARGET_CANONICAL"
+            kustomize edit set image "${IMAGE_NAME}=${IMAGE_NAME}:${NEW_TAG}"
           fi
 
       - name: Open the deploy PR
@@ -492,37 +546,76 @@ jobs:
           CALLER_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          cd infra
-          if git diff --quiet; then
+          if [ -z "$TARGET_BRANCH" ] || [[ ! "$TARGET_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$TARGET_BRANCH" == -* ]] || [[ "$TARGET_BRANCH" == /* ]] || [[ "$TARGET_BRANCH" == *".."* ]]; then
+            echo "::error::Invalid target_branch '$TARGET_BRANCH'. Fails closed."
+            exit 1
+          fi
+          if [ -z "$KUSTOMIZE_PATH" ] || [[ "$KUSTOMIZE_PATH" == /* ]] || [[ "$KUSTOMIZE_PATH" == ~* ]] || [[ "$KUSTOMIZE_PATH" == -* ]] || [[ "$KUSTOMIZE_PATH" == *$'\n'* ]] || [[ "$KUSTOMIZE_PATH" == *$'\r'* ]] || [[ "$KUSTOMIZE_PATH" =~ (^|/)\.\.(/|$) ]]; then
+            echo "::error::Invalid kustomize_path '$KUSTOMIZE_PATH'. Fails closed."
+            exit 1
+          fi
+
+          cd -- infra
+          INFRA_ROOT="$(pwd -P)"
+          TARGET_CANONICAL="$(cd -- "${INFRA_ROOT}/${KUSTOMIZE_PATH}" && pwd -P)"
+          case "$TARGET_CANONICAL" in
+            "$INFRA_ROOT"/*)
+              CANONICAL_KUSTOMIZE_PATH="${TARGET_CANONICAL#"$INFRA_ROOT"/}"
+              ;;
+            *)
+              echo "::error::Kustomize path escapes infra root: '$KUSTOMIZE_PATH'. Fails closed."
+              exit 1
+              ;;
+          esac
+
+          if git diff --quiet -- "${CANONICAL_KUSTOMIZE_PATH}"; then
             echo "No changes to deploy."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          SERVICE=$(basename "${KUSTOMIZE_PATH}")
+          SERVICE="$(basename -- "${CANONICAL_KUSTOMIZE_PATH}")"
           if [ "$MODE" = "digest" ]; then
             BRANCH="gitops/${SERVICE}-digest-${RUN_ID}"
             COMMIT_MSG="chore(gitops): auto-deploy ${IMAGE_NAME} to ${NEW_DIGEST}"
             PR_TITLE="chore(gitops): auto-deploy ${SERVICE} to ${NEW_DIGEST}"
-            PR_BODY="Automated GitOps digest pin of ${IMAGE_NAME} to ${NEW_DIGEST} (version ${NEW_TAG}) at ${KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
+            PR_BODY="Automated GitOps digest pin of ${IMAGE_NAME} to ${NEW_DIGEST} (version ${NEW_TAG}) at ${CANONICAL_KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
           else
             BRANCH="gitops/${SERVICE}-${NEW_TAG}-${RUN_ID}"
             COMMIT_MSG="chore(gitops): auto-deploy ${IMAGE_NAME} to ${NEW_TAG}"
             PR_TITLE="chore(gitops): auto-deploy ${SERVICE} to ${NEW_TAG}"
-            PR_BODY="Automated GitOps pin of ${IMAGE_NAME} to ${NEW_TAG} at ${KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
+            PR_BODY="Automated GitOps pin of ${IMAGE_NAME} to ${NEW_TAG} at ${CANONICAL_KUSTOMIZE_PATH}. Opened by gitops-sync from ${CALLER_REPO} run ${RUN_ID}; approved and merged by the deploy approver identity."
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add .
+          git add -- "${CANONICAL_KUSTOMIZE_PATH}"
           git commit -m "$COMMIT_MSG"
-          git push origin "$BRANCH"
+          if [ -n "${GH_TOKEN:-}" ]; then
+            ASKPASS_SCRIPT="$(mktemp)"
+            trap 'rm -f "$ASKPASS_SCRIPT"' EXIT
+            chmod 700 "$ASKPASS_SCRIPT"
+            cat > "$ASKPASS_SCRIPT" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf 'x-access-token\n' ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          SH
+            GIT_ASKPASS="$ASKPASS_SCRIPT" GIT_TERMINAL_PROMPT=0 git push origin -- "$BRANCH"
+          else
+            git push origin -- "$BRANCH"
+          fi
           PR_URL=$(gh pr create \
             --repo duikindiesee/kooker-infra \
             --base "${TARGET_BRANCH}" \
             --head "$BRANCH" \
             --title "$PR_TITLE" \
             --body "$PR_BODY")
+          if [[ ! "$PR_URL" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::Unexpected PR URL returned by gh pr create: '$PR_URL'"
+            exit 1
+          fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "Opened deploy PR: $PR_URL"
@@ -542,7 +635,7 @@ jobs:
             exit 1
           fi
 
-          INFRA_ROOT="$(cd "$INFRA_DIR" && pwd -P)"
+          INFRA_ROOT="$(cd -- "$INFRA_DIR" && pwd -P)"
 
           if [ -z "$KUSTOMIZE_PATH" ] || [[ "$KUSTOMIZE_PATH" == /* ]] || [[ "$KUSTOMIZE_PATH" == ~* ]]; then
             echo "::error::Invalid or absolute kustomize_path: '$KUSTOMIZE_PATH'. Fails closed."
@@ -554,7 +647,7 @@ jobs:
             exit 1
           fi
 
-          TARGET_CANONICAL="$(cd "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
+          TARGET_CANONICAL="$(cd -- "$INFRA_ROOT/$KUSTOMIZE_PATH" && pwd -P)"
 
           case "$TARGET_CANONICAL" in
             "$INFRA_ROOT"/*)

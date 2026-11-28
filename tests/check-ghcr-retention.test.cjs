@@ -28,7 +28,7 @@ function assertRuntimeContract(content) {
   const nextStepRel = restAfterSetup.slice(setupMarker.length).search(/\n\s{6}-\s+name:/);
   const setupStepBlock = nextStepRel >= 0 ? restAfterSetup.slice(0, setupMarker.length + nextStepRel) : restAfterSetup;
 
-  assert.match(setupStepBlock, /uses:\s*actions\/setup-node@v6/, 'Setup step must use official actions/setup-node@v6');
+  assert.match(setupStepBlock, /uses:\s*actions\/setup-node@[0-9a-f]{40}/, 'Setup step must use SHA-pinned official actions/setup-node');
   assert.match(setupStepBlock, /node-version:\s*24(?:\s|$)/, 'Setup step must explicitly specify scalar node-version 24');
 
   const pruneMarker = '- name: Prune old image tags\n';
@@ -103,7 +103,7 @@ const currentStep = extractStep(workflowText);
 // Verification of upstream RED:
 // When upstream actions/delete-package-versions@v5 was used, it inspected info.version = version.name (sha256:...)
 // rather than metadata.container.tags.
-// Here we document the MoJo independent review attribution and provide simulated selector check.
+// Here we document the independent review attribution and provide simulated selector check.
 function simulateUpstreamSelector(versions, ignoreRegex, minVersionsToKeep) {
   // Upstream get-versions.ts line 71:
   // info.version = version.name
@@ -122,7 +122,7 @@ function simulateUpstreamSelector(versions, ignoreRegex, minVersionsToKeep) {
 
 if (process.argv.includes('--check-unmodified-red')) {
   console.log('=== Verifying Upstream Action Defect (RED Control) ===');
-  console.log('Attribution: MoJo independently verified upstream defect at commit e5bc658cc4c965c472efe991f8beea3981499c55:');
+  console.log('Attribution: Independent review verified upstream defect at commit e5bc658cc4c965c472efe991f8beea3981499c55:');
   console.log('- Upstream actions/delete-package-versions@v5 getOldestVersions extracts info.version = version.name (e.g. sha256:...)');
   console.log('- Upstream finalIds evaluates input.ignoreVersions.test(info.version), completely ignoring metadata.container.tags');
   console.log('- In 61 digest-name versions where oldest has tags [\"branch-old\", \"v1.2.3\"], ID 1 is selected for deletion by upstream.');
@@ -284,7 +284,7 @@ async function runRetentionTest(testCase) {
     const inputs = testCase.inputs || {};
     const env = {
       ...process.env,
-      GITHUB_API_URL: mockApiUrl,
+      GITHUB_API_URL: testCase.apiUrl || mockApiUrl,
       GITHUB_REPOSITORY_OWNER: inputs.owner || 'duikindiesee',
       INPUT_PACKAGE_NAME: inputs.packageName !== undefined ? inputs.packageName : 'test-image',
       INPUT_MIN_VERSIONS_TO_KEEP: inputs.minVersionsToKeep !== undefined ? String(inputs.minVersionsToKeep) : '60',
@@ -883,7 +883,47 @@ async function runAllTests() {
       console.log('PASS test 30: delayed-in-bound response completes successfully and executes planned pruning');
     }
 
-    console.log('\nALL 30 RETENTION TESTS PASSED SUCCESSFULLY.');
+    // Test 31: Path-segment traversal '..' in package-name or owner fails closed
+    {
+      const res = await runRetentionTest({
+        description: 'Test 31: traversal .. in package-name fails closed',
+        versions: [makeVersion(1, '2026-01-01T00:00:00Z', ['latest'])],
+        inputs: { packageName: '..' },
+        expectedExit: 1,
+        expectedDeletions: []
+      });
+      assert.match(res.stderr, /\[ERR_CONFIG_INVALID\]/, 'stderr must report [ERR_CONFIG_INVALID]');
+      console.log('PASS test 31: path-segment traversal .. in package-name fails closed');
+    }
+
+    // Test 32: Non-loopback plaintext http:// API URL fails closed
+    {
+      const res = await runRetentionTest({
+        description: 'Test 32: non-loopback http:// GITHUB_API_URL fails closed',
+        apiUrl: 'http://api.example.invalid',
+        versions: [makeVersion(1, '2026-01-01T00:00:00Z', ['latest'])],
+        inputs: { minVersionsToKeep: 0 },
+        expectedExit: 1,
+        expectedDeletions: []
+      });
+      assert.match(res.stderr, /\[ERR_INSECURE_PROTOCOL\]/, 'stderr must report [ERR_INSECURE_PROTOCOL]');
+      console.log('PASS test 32: non-loopback plaintext http:// GITHUB_API_URL fails closed');
+    }
+
+    // Test 33: Oversized ignore-versions regex (>256 chars) fails closed
+    {
+      const res = await runRetentionTest({
+        description: 'Test 33: oversized ignore-versions regex fails closed',
+        versions: [makeVersion(1, '2026-01-01T00:00:00Z', ['latest'])],
+        inputs: { ignoreVersions: 'a'.repeat(300) },
+        expectedExit: 1,
+        expectedDeletions: []
+      });
+      assert.match(res.stderr, /\[ERR_REGEX_INVALID\]/, 'stderr must report [ERR_REGEX_INVALID]');
+      console.log('PASS test 33: oversized ignore-versions regex fails closed');
+    }
+
+    console.log('\nALL 33 RETENTION TESTS PASSED SUCCESSFULLY.');
   } finally {
     clearTimeout(overallTimeout);
   }

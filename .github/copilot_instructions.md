@@ -26,7 +26,7 @@ This is part of the Kooker ecosystem, a microservices-based platform for meal pl
 - Avoid bypassing architectural networking boundaries; all frontend microservices must route exclusively through the `kooker-gateway`.
 
 ### Java/Spring Boot
-- Use Java 17+ features (records, sealed classes, pattern matching)
+- Use Java 25+ features (records, sealed classes, pattern matching)
 - Follow Spring Boot 3.x best practices
 - Use constructor injection (via Lombok `@RequiredArgsConstructor`)
 - Implement proper exception handling with `@RestControllerAdvice`
@@ -129,8 +129,8 @@ This is part of the Kooker ecosystem, a microservices-based platform for meal pl
 ### Documentation
 - Document public APIs with OpenAPI/Swagger annotations
 - Keep README files up to date with setup instructions
-- Document architectural decisions in ADR files (AsciiDoc format)
-- Use PlantUML for diagrams with `!theme plain`
+- Document architectural decisions in ADR files or numbered specs under `docs/specs/`
+- Use Mermaid UML diagrams (sequence/journey and component/trust-boundary)
 - Include sequence diagrams for complex flows
 - Maintain changelog for releases
 
@@ -184,13 +184,13 @@ management:
       probability: 1.0  # 100% in dev, lower in prod
   otlp:
     tracing:
-      endpoint: http://localhost:4318/v1/traces
+      endpoint: https://otel-collector.example.invalid/v1/traces
 ```
 
 ### Accessing Observability Tools
-- **Grafana:** http://localhost:3000 (admin/admin)
-- **Jaeger UI:** http://localhost:16686
-- **Prometheus:** http://localhost:9090
+- **Grafana:** https://grafana.example.invalid (SSO / RBAC)
+- **Jaeger UI:** https://jaeger.example.invalid
+- **Prometheus:** https://prometheus.example.invalid
 - **CLI:** `./search-logs.sh help`
 
 ## Common Pitfalls to Avoid
@@ -208,7 +208,7 @@ management:
 - `REFRESH-TOKEN-METRICS-ADR.adoc` - Metrics architecture
 
 ## Related Repositories
-All services in `/home/kooker/source/`:
+Core workspace repositories in the organization:
 - `kooker-service-auth` - Authentication & JWT
 - `kooker-service-user` - User management
 - `kooker-service-stream` - Activity streams

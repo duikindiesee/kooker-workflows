@@ -281,11 +281,13 @@ function inspectRenderedDocuments(renderedYamlText, expectedImage, expectedDiges
           podSpecs.push(res.spec);
         }
         for (const ps of podSpecs) {
-          const containers = ps.containers || [];
-          if (Array.isArray(containers)) {
-            for (const c of containers) {
-              if (c && c.image && (c.image === exactTarget || c.image.startsWith(targetPrefix))) {
-                throw new Error(`RENDER_UNRELATED_MUTATION: Unrelated resource '${resKey}' container '${c.name}' has image '${c.image}'`);
+          for (const field of ['containers', 'initContainers']) {
+            const containers = ps[field] || [];
+            if (Array.isArray(containers)) {
+              for (const c of containers) {
+                if (c && c.image && (c.image === exactTarget || c.image.startsWith(targetPrefix))) {
+                  throw new Error(`RENDER_UNRELATED_MUTATION: Unrelated resource '${resKey}' ${field} '${c.name}' has image '${c.image}'`);
+                }
               }
             }
           }

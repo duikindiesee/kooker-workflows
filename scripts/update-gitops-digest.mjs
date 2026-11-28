@@ -9,8 +9,6 @@
 //   NEW_TAG: inputs.new_tag (e.g. 1.14.0)
 //   INFRA_DIR: path to infra checkout (default: 'infra')
 
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);

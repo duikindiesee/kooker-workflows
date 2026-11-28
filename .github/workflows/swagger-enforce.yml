@@ -6,41 +6,303 @@ on:
       java-version:
         required: false
         type: string
-        default: '21'
+        default: '25'
+    secrets:
+      MAVEN_PUBLISH_TOKEN:
+        required: false
+
+permissions: {}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   validate-swagger:
+    permissions:
+      contents: read
     # Uses the proven kooker1-org self-hosted pool (see org-runner-canary.yml in kooker-infra and
     # maven-version-bump.yml/ghcr-retention.yml/gitops-sync.yml in this repo) -- not the retired
     # [self-hosted, local-linux] label this job was moved off of.
     runs-on: [self-hosted, Linux, X64, kooker1-org, docker]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Validate workflow inputs
+        shell: bash
+        env:
+          INPUT_JAVA_VERSION: ${{ inputs.java-version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$INPUT_JAVA_VERSION" =~ ^[1-9][0-9]*$ ]] || [ "$INPUT_JAVA_VERSION" -lt 25 ]; then
+            echo "::error::java-version must be an integer >= 25 (JDK 25 baseline), got '$INPUT_JAVA_VERSION'."
+            exit 1
+          fi
+          echo "Validated java-version=$INPUT_JAVA_VERSION"
 
-      - name: Set up JDK ${{ inputs.java-version }}
-        uses: actions/setup-java@v5
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: ${{ inputs.java-version }}
           distribution: 'temurin'
           cache: 'maven'
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.MAVEN_PUBLISH_TOKEN || github.token }}
+
+      - name: Set up Node.js for OpenAPI validation
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
 
       - name: Create required folders
-        run: mkdir -p target/classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/classes
 
       - name: Generate OpenAPI spec using springdoc-openapi plugin
+        shell: bash
         run: |
-          # We use the springdoc-openapi-maven-plugin to generate the final spec at build time,
-          # or simply verify compilation to ensure the spec annotations are valid.
-          # Here we just run the spring boot plugin to start internal validation.
+          set -euo pipefail
           mvn clean verify -DskipTests
-          
-          # If the repository configures springdoc-openapi-maven-plugin, this step
-          # verifies that it successfully spits out the openapi.json.
-          if [ -d "target/openapi" ] || ls target/*.json 1> /dev/null 2>&1; then
-             echo "Swagger documentation generated successfully."
-          else
-             echo "Warning/Error: Did not see openapi.json output. Ensure springdoc-openapi-maven-plugin is configured."
-          fi
+
+      - name: Validate generated OpenAPI spec and security controls (fail closed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+
+          const cwd = process.cwd();
+          const realRoot = fs.realpathSync(cwd);
+
+          function findOpenApiSpecs() {
+            const candidates = [];
+            const directPaths = [
+              path.join(cwd, 'target', 'openapi', 'openapi.json'),
+              path.join(cwd, 'target', 'openapi.json'),
+            ];
+            for (const p of directPaths) {
+              if (fs.existsSync(p)) candidates.push(p);
+            }
+            for (const entry of fs.readdirSync(cwd, { withFileTypes: true })) {
+              if (!entry.isDirectory() || entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'target') {
+                continue;
+              }
+              const modPaths = [
+                path.join(cwd, entry.name, 'target', 'openapi', 'openapi.json'),
+                path.join(cwd, entry.name, 'target', 'openapi.json'),
+              ];
+              for (const p of modPaths) {
+                if (fs.existsSync(p)) candidates.push(p);
+              }
+            }
+            return candidates;
+          }
+
+          function findSpringConfigs(dir, results = []) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'target') continue;
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                findSpringConfigs(full, results);
+              } else if (entry.isFile()) {
+                const norm = full.replaceAll('\\', '/');
+                if (/\/src\/main\/resources\/application[^/]*\.(ya?ml|properties)$/.test(norm)) {
+                  results.push(full);
+                }
+              }
+            }
+            return results;
+          }
+
+          function hasEnabledSpringdoc(text, isProperties) {
+            const lines = text.split(/\r?\n/);
+            if (isProperties) {
+              for (const raw of lines) {
+                const line = raw.replace(/#.*$/, '').trim();
+                if (/^springdoc\.(swagger-ui|api-docs)\.enabled\s*=\s*true$/i.test(line)) {
+                  return line;
+                }
+              }
+              return null;
+            }
+            // Lightweight indentation-aware YAML scanner for springdoc.(swagger-ui|api-docs).enabled: true
+            const stack = [];
+            for (const raw of lines) {
+              const noComment = raw.replace(/\s+#.*$/, '');
+              if (!noComment.trim() || noComment.trim().startsWith('#')) continue;
+              const indentMatch = noComment.match(/^(\s*)/);
+              const indent = indentMatch ? indentMatch[1].length : 0;
+              const trimmed = noComment.trim();
+              if (trimmed.startsWith('-')) continue;
+              const kv = trimmed.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
+              if (!kv) continue;
+              const key = kv[1];
+              const val = kv[2].trim().replace(/^['"]|['"]$/g, '');
+              while (stack.length > 0 && stack[stack.length - 1].indent >= indent) {
+                stack.pop();
+              }
+              stack.push({ indent, key });
+              const fullKey = stack.map(s => s.key).join('.');
+              if (
+                (fullKey === 'springdoc.swagger-ui.enabled' || fullKey === 'springdoc.api-docs.enabled') &&
+                /^true$/i.test(val)
+              ) {
+                return `${fullKey}: ${val}`;
+              }
+            }
+            return null;
+          }
+
+          const specPaths = findOpenApiSpecs();
+          if (specPaths.length === 0) {
+            console.error('::error::No generated openapi.json found (checked target/openapi/openapi.json, target/openapi.json, and module targets). Ensure springdoc-openapi-maven-plugin is configured.');
+            process.exit(1);
+          }
+
+          const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
+          const PUBLIC_AUTH_ALLOWLIST = new Set([
+            '/actuator/health',
+            '/health',
+            '/api/auth/login',
+            '/api/auth/refresh',
+            '/api/auth/register',
+            '/api/auth/google',
+            '/api/v1/auth/login',
+            '/api/v1/auth/refresh',
+          ]);
+
+          for (const specPath of specPaths) {
+            const st = fs.lstatSync(specPath);
+            if (!st.isFile() || st.isSymbolicLink()) {
+              console.error(`::error::OpenAPI spec path must be a regular non-symlink file: ${specPath}`);
+              process.exit(1);
+            }
+            const realSpec = fs.realpathSync(specPath);
+            if (!realSpec.startsWith(realRoot + path.sep)) {
+              console.error(`::error::OpenAPI spec escapes workspace root: ${specPath}`);
+              process.exit(1);
+            }
+            const raw = fs.readFileSync(specPath, 'utf8').trim();
+            if (!raw) {
+              console.error(`::error::OpenAPI spec is empty: ${specPath}`);
+              process.exit(1);
+            }
+
+            let spec;
+            try {
+              spec = JSON.parse(raw);
+            } catch (err) {
+              console.error(`::error::Malformed OpenAPI JSON in ${specPath}: ${err.message}`);
+              process.exit(1);
+            }
+
+            if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+              console.error(`::error::OpenAPI spec root must be a JSON object: ${specPath}`);
+              process.exit(1);
+            }
+
+            const isOas3 = typeof spec.openapi === 'string' && /^3\.\d+(\.\d+)?$/.test(spec.openapi);
+            const isOas2 = typeof spec.swagger === 'string' && /^2\.0$/.test(spec.swagger);
+            if (!isOas3 && !isOas2) {
+              console.error(`::error::Spec ${specPath} must declare valid 'openapi' (^3.x) or 'swagger' (2.0) version.`);
+              process.exit(1);
+            }
+
+            if (!spec.info || typeof spec.info !== 'object' || typeof spec.info.title !== 'string' || !spec.info.title.trim() || typeof spec.info.version !== 'string' || !spec.info.version.trim()) {
+              console.error(`::error::Spec ${specPath} is missing valid info.title or info.version.`);
+              process.exit(1);
+            }
+
+            if (!spec.paths || typeof spec.paths !== 'object' || Array.isArray(spec.paths) || Object.keys(spec.paths).length === 0) {
+              console.error(`::error::Spec ${specPath} must declare non-empty paths.`);
+              process.exit(1);
+            }
+
+            const schemes = isOas3
+              ? (spec.components && spec.components.securitySchemes)
+              : spec.securityDefinitions;
+            if (!schemes || typeof schemes !== 'object' || Array.isArray(schemes) || Object.keys(schemes).length === 0) {
+              console.error(`::error::Spec ${specPath} must define non-empty ${isOas3 ? 'components.securitySchemes' : 'securityDefinitions'}.`);
+              process.exit(1);
+            }
+
+            for (const [name, scheme] of Object.entries(schemes)) {
+              if (!scheme || typeof scheme !== 'object') {
+                console.error(`::error::Invalid security scheme '${name}' in ${specPath}.`);
+                process.exit(1);
+              }
+              const type = String(scheme.type || '').toLowerCase();
+              const httpScheme = String(scheme.scheme || '').toLowerCase();
+              const apiKeyIn = String(scheme.in || '').toLowerCase();
+              if (type === 'basic' || (type === 'http' && httpScheme === 'basic')) {
+                console.error(`::error::Insecure plaintext HTTP Basic security scheme '${name}' is forbidden in ${specPath}.`);
+                process.exit(1);
+              }
+              if (type === 'apikey' && apiKeyIn === 'query') {
+                console.error(`::error::Insecure query-parameter apiKey security scheme '${name}' is forbidden in ${specPath}.`);
+                process.exit(1);
+              }
+              const validStrong =
+                (type === 'http' && httpScheme === 'bearer') ||
+                type === 'oauth2' ||
+                type === 'openidconnect' ||
+                type === 'mutualtls' ||
+                (type === 'apikey' && (apiKeyIn === 'header' || apiKeyIn === 'cookie'));
+              if (!validStrong) {
+                console.error(`::error::Unsupported or weak security scheme '${name}' (type=${scheme.type}) in ${specPath}.`);
+                process.exit(1);
+              }
+            }
+
+            const hasValidSecReqs = (secArr) =>
+              Array.isArray(secArr) &&
+              secArr.length > 0 &&
+              secArr.every(req => req && typeof req === 'object' && !Array.isArray(req) && Object.keys(req).length > 0);
+
+            const globalSecured = hasValidSecReqs(spec.security);
+            if (Array.isArray(spec.security) && spec.security.some(req => !req || typeof req !== 'object' || Object.keys(req).length === 0)) {
+              console.error(`::error::Top-level security in ${specPath} must not contain empty {} anonymous requirement.`);
+              process.exit(1);
+            }
+
+            for (const [pathKey, pathItem] of Object.entries(spec.paths)) {
+              if (!pathItem || typeof pathItem !== 'object') continue;
+              for (const [method, op] of Object.entries(pathItem)) {
+                if (!HTTP_METHODS.has(method.toLowerCase()) || !op || typeof op !== 'object') continue;
+                const isAllowlistedPublic = PUBLIC_AUTH_ALLOWLIST.has(pathKey);
+                if (op.security !== undefined) {
+                  if (!hasValidSecReqs(op.security) && !isAllowlistedPublic) {
+                    console.error(`::error::Operation ${method.toUpperCase()} ${pathKey} in ${specPath} explicitly disables or leaves empty security.`);
+                    process.exit(1);
+                  }
+                } else if (!globalSecured && !isAllowlistedPublic) {
+                  console.error(`::error::Operation ${method.toUpperCase()} ${pathKey} in ${specPath} has no operation-level or global security requirement.`);
+                  process.exit(1);
+                }
+              }
+            }
+            console.log(`PASS OpenAPI security & schema validation: ${path.relative(cwd, specPath)}`);
+          }
+
+          const springConfigs = findSpringConfigs(cwd);
+          for (const cfg of springConfigs) {
+            const rel = path.relative(cwd, cfg).replaceAll('\\', '/');
+            const isProps = rel.endsWith('.properties');
+            const text = fs.readFileSync(cfg, 'utf8');
+            const hit = hasEnabledSpringdoc(text, isProps);
+            if (hit) {
+              console.error(`::error file=${rel}::Insecure Springdoc runtime exposure (${hit}) in ${rel}. Swagger UI and API docs must be disabled or strictly admin-gated outside tests.`);
+              process.exit(1);
+            }
+          }
+          console.log(`PASS Springdoc exposure check (${springConfigs.length} config file(s) checked).`);
+          NODE
